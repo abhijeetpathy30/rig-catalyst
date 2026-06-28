@@ -124,6 +124,50 @@ export const sendMessage = async (message: string): Promise<string> => {
   });
 };
 
+/**
+ * Fetch papers from a single specific journal. Used for parallel per-journal loading.
+ */
+export const fetchPapersFromJournal = async (
+  journal: string,
+  topic: string,
+  dateCutoff: string,
+  count: number
+): Promise<FeedItem[]> => {
+  const ai = getAI();
+  const prompt = `
+    Find ${count} recent academic papers about "${topic}" published in "${journal}" after ${dateCutoff}.
+    Return STRICT JSON array ONLY. Start response with "[". No preamble.
+    [
+      {
+        "title": "Exact paper title",
+        "authors": "Last, F. & Last, F.",
+        "journal": "${journal}",
+        "date": "YYYY-MM-DD",
+        "link": "https://...",
+        "summary": "2-sentence plain English summary. What did they find, and why does it matter?"
+      }
+    ]
+    If fewer than ${count} papers found, return what is available. If none found, return [].
+  `;
+
+  return withRetry(async () => {
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+        config: { tools: [{ googleSearch: {} }] }
+      });
+      const jsonString = extractJSON(response.text || "[]");
+      if (!jsonString) return [];
+      const items = JSON.parse(jsonString) as FeedItem[];
+      return items.filter(i => i.title && i.summary).slice(0, count);
+    } catch (e) {
+      console.error(`Failed to fetch from ${journal}`, e);
+      return [];
+    }
+  }, 2, 3000);
+};
+
 export const fetchResearchFeed = async (settings: UserSettings, page: number = 1, dateCutoff?: string, limit: number = 10): Promise<FeedItem[]> => {
   const ai = getAI();
   const offsetPhrase = page > 1 ? `SKIP the first ${limit * (page - 1)} results. Return the NEXT ${limit} unique papers.` : "";

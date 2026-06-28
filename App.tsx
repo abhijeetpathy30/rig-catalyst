@@ -3,7 +3,7 @@ import {
   BookOpen, Search, Zap, PenTool, Settings, X, Send, Sparkles, ArrowRight, RefreshCw, Plus, Network, FileText, Image as ImageIcon, Bookmark, Share2, Trash2, Maximize2, Lightbulb, Calendar, Moon, Sun, AlertTriangle, Hash, FlaskConical, Layout, Upload, Link, User, ChevronDown, Check, Compass, Quote, Copy
 } from 'lucide-react';
 import { AppView, Message, UserSettings, FeedItem, Attachment, JournalSuggestion } from './types';
-import { initializeChat, sendMessage as sendGeminiMessage, fetchResearchFeed, analyzeContent, generateVisualAbstract, calculatePaperImpact, generatePaperSummary, suggestJournals } from './services/geminiService';
+import { initializeChat, sendMessage as sendGeminiMessage, fetchPapersFromJournal, analyzeContent, generateVisualAbstract, calculatePaperImpact, generatePaperSummary, suggestJournals } from './services/geminiService';
 import { MarkdownMessage } from './components/MarkdownMessage';
 import { SimpleChart } from './components/SimpleChart';
 import { InputSection } from './components/InputSection';
@@ -19,6 +19,38 @@ const DEFAULT_SETTINGS: UserSettings = {
 };
 
 // --- SUBCOMPONENTS ---
+
+const FeedCardSkeleton: React.FC = () => (
+  <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-100 dark:border-slate-700 shadow-sm overflow-hidden flex flex-col animate-pulse">
+    <div className="h-40 bg-gradient-to-r from-slate-200 via-slate-100 to-slate-200 dark:from-slate-700 dark:via-slate-600 dark:to-slate-700 bg-[length:200%_100%] animate-[shimmer_1.5s_infinite]" />
+    <div className="p-5 space-y-3 flex-1">
+      <div className="h-3 bg-slate-200 dark:bg-slate-700 rounded w-1/3" />
+      <div className="h-5 bg-slate-200 dark:bg-slate-700 rounded w-full" />
+      <div className="h-5 bg-slate-200 dark:bg-slate-700 rounded w-4/5" />
+      <div className="h-3 bg-slate-200 dark:bg-slate-700 rounded w-full" />
+      <div className="h-3 bg-slate-200 dark:bg-slate-700 rounded w-3/4" />
+      <div className="h-10 bg-slate-100 dark:bg-slate-700/50 rounded-lg mt-4" />
+    </div>
+  </div>
+);
+
+interface UploadCardProps { onUpload: () => void; }
+const UploadCard: React.FC<UploadCardProps> = ({ onUpload }) => (
+  <div onClick={onUpload} className="bg-gradient-to-br from-academic-600 to-academic-500 rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 overflow-hidden flex flex-col h-full cursor-pointer group border border-academic-400/30 min-h-[280px]">
+    <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
+      <div className="w-16 h-16 bg-white/20 rounded-2xl flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+        <Upload size={28} className="text-white" />
+      </div>
+      <h4 className="text-white font-bold text-lg mb-2">Analyze Your Paper</h4>
+      <p className="text-white/70 text-sm leading-relaxed">Upload a PDF or paste a link to run the full Research Studio analysis on your own work.</p>
+    </div>
+    <div className="px-5 pb-5">
+      <div className="w-full py-2.5 bg-white/20 hover:bg-white/30 text-white rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-colors">
+        <Upload size={15} /> Upload PDF / Paste Link
+      </div>
+    </div>
+  </div>
+);
 
 interface FeedCardProps { item: FeedItem; onOpen: (item: FeedItem) => void; onGenerateImage: (item: FeedItem) => void; onSave: (item: FeedItem) => void; onCite: (item: FeedItem) => void; isGeneratingImage: boolean; isSaved: boolean; }
 const FeedCard: React.FC<FeedCardProps> = ({ item, onOpen, onGenerateImage, onSave, onCite, isGeneratingImage, isSaved }) => {
@@ -84,12 +116,16 @@ export default function App() {
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [isFeedLoading, setIsFeedLoading] = useState(false);
   const [feedError, setFeedError] = useState<string | null>(null);
-  
+  const [loadingJournals, setLoadingJournals] = useState<string[]>([]);
+  const [loadedCount, setLoadedCount] = useState(0);
+
   // Feed Filters (Header)
   const [feedTopic, setFeedTopic] = useState(DEFAULT_SETTINGS.field);
   const [feedJournals, setFeedJournals] = useState<string>(DEFAULT_SETTINGS.trackedJournals.join(', '));
   const [feedDateCutoff, setFeedDateCutoff] = useState(() => { const d = new Date(); d.setDate(d.getDate() - 90); return d.toISOString().split('T')[0]; });
   const [feedLimit, setFeedLimit] = useState(8);
+  const [addJournalInput, setAddJournalInput] = useState('');
+  const [showAddJournal, setShowAddJournal] = useState(false);
 
   // Journal Discovery State
   const [showJournalDiscovery, setShowJournalDiscovery] = useState(false);
@@ -171,7 +207,9 @@ export default function App() {
   const applySelectedJournals = () => {
       const selected = journalSuggestions.filter(j => j.selected).map(j => j.name);
       if (selected.length > 0) {
-          setFeedJournals(selected.join(', '));
+          const existing = feedJournals.split(',').map(s => s.trim()).filter(Boolean);
+          const merged = Array.from(new Set([...existing, ...selected]));
+          setFeedJournals(merged.join(', '));
       }
       setShowJournalDiscovery(false);
   };
@@ -181,18 +219,53 @@ export default function App() {
   const loadFeed = async () => {
     setIsFeedLoading(true);
     setFeedError(null);
+    setFeed([]);
+    setLoadedCount(0);
+
+    const journals = feedJournals.split(',').map(s => s.trim()).filter(Boolean);
+    const perJournal = Math.max(1, Math.ceil(feedLimit / journals.length));
+    setLoadingJournals(journals);
+
     try {
-      // Use header values for the fetch
-      const currentJournals = feedJournals.split(',').map(s => s.trim()).filter(Boolean);
-      const tempSettings = { ...settings, field: feedTopic, trackedJournals: currentJournals.length > 0 ? currentJournals : settings.trackedJournals };
-      
-      const items = await fetchResearchFeed(tempSettings, 1, feedDateCutoff, feedLimit);
-      setFeed(items);
+      // Fetch all journals in parallel — each gets its own dedicated request
+      const results = await Promise.allSettled(
+        journals.map(journal =>
+          fetchPapersFromJournal(journal, feedTopic, feedDateCutoff, perJournal)
+            .then(papers => {
+              // Stream results in as each journal completes
+              if (papers.length > 0) {
+                setFeed(prev => [...prev, ...papers].slice(0, feedLimit));
+                setLoadedCount(prev => prev + papers.length);
+              }
+              return papers;
+            })
+        )
+      );
+
+      const allPapers = results.flatMap(r => r.status === 'fulfilled' ? r.value : []);
+      if (allPapers.length === 0) setFeedError("No papers found. Try changing your topic or date range.");
     } catch (e: any) {
       setFeedError(e.message || "Failed to load feed.");
     } finally {
       setIsFeedLoading(false);
+      setLoadingJournals([]);
     }
+  };
+
+  const addJournal = (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const existing = feedJournals.split(',').map(s => s.trim()).filter(Boolean);
+    if (!existing.some(j => j.toLowerCase() === trimmed.toLowerCase())) {
+      setFeedJournals([...existing, trimmed].join(', '));
+    }
+    setAddJournalInput('');
+    setShowAddJournal(false);
+  };
+
+  const removeJournal = (name: string) => {
+    const updated = feedJournals.split(',').map(s => s.trim()).filter(j => j.toLowerCase() !== name.toLowerCase());
+    setFeedJournals(updated.join(', '));
   };
 
   const toggleSavePaper = (item: FeedItem) => {
@@ -372,24 +445,40 @@ export default function App() {
                     />
                 </div>
                 
-                {/* 2. JOURNAL DISCOVERY INPUT */}
-                <div className="flex items-center gap-2 flex-1 min-w-[200px] relative">
-                    <BookOpen size={14} className="text-slate-400" />
-                    <span className="font-semibold text-slate-500 text-xs uppercase tracking-wide">Journals</span>
-                    <div className="flex-1 flex relative">
-                        <input 
-                            value={feedJournals}
-                            onChange={(e) => setFeedJournals(e.target.value)}
-                            placeholder="Nature, Science..."
-                            className="bg-transparent border-b border-slate-300 dark:border-slate-600 focus:border-academic-500 outline-none w-full text-slate-800 dark:text-slate-200 font-medium py-1 pr-8" 
-                        />
-                        <button 
-                            onClick={() => setShowJournalDiscovery(!showJournalDiscovery)} 
-                            className="absolute right-0 top-1 text-academic-500 hover:text-academic-600 hover:bg-academic-50 dark:hover:bg-academic-900/20 rounded p-0.5"
+                {/* 2. JOURNAL CHIPS + ADD */}
+                <div className="flex items-start gap-2 flex-1 min-w-[250px] relative">
+                    <BookOpen size={14} className="text-slate-400 mt-1.5 shrink-0" />
+                    <div className="flex-1">
+                      <div className="flex flex-wrap gap-1.5 items-center">
+                        {feedJournals.split(',').map(s => s.trim()).filter(Boolean).map(j => (
+                          <span key={j} className="flex items-center gap-1 px-2 py-0.5 bg-academic-100 dark:bg-academic-900/30 text-academic-700 dark:text-academic-300 rounded-full text-xs font-semibold">
+                            {j}
+                            <button onClick={() => removeJournal(j)} className="hover:text-red-500 transition-colors ml-0.5"><X size={10} /></button>
+                          </span>
+                        ))}
+                        {showAddJournal ? (
+                          <input
+                            autoFocus
+                            value={addJournalInput}
+                            onChange={e => setAddJournalInput(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter') addJournal(addJournalInput); if (e.key === 'Escape') setShowAddJournal(false); }}
+                            onBlur={() => { if (!addJournalInput) setShowAddJournal(false); }}
+                            placeholder="Journal name..."
+                            className="px-2 py-0.5 bg-white dark:bg-slate-800 border border-academic-400 rounded-full text-xs outline-none w-32 text-slate-800 dark:text-slate-200"
+                          />
+                        ) : (
+                          <button onClick={() => setShowAddJournal(true)} className="flex items-center gap-0.5 px-2 py-0.5 border border-dashed border-slate-300 dark:border-slate-600 text-slate-400 hover:text-academic-500 hover:border-academic-400 rounded-full text-xs transition-colors">
+                            <Plus size={10} /> Add
+                          </button>
+                        )}
+                        <button
+                            onClick={() => setShowJournalDiscovery(!showJournalDiscovery)}
+                            className="text-academic-500 hover:text-academic-600 p-0.5 rounded"
                             title="Discover Top Journals for this Topic"
                         >
-                            <Compass size={16} />
+                            <Compass size={14} />
                         </button>
+                      </div>
                     </div>
 
                     {/* JOURNAL SCOUT POPOVER */}
@@ -481,27 +570,49 @@ export default function App() {
         {/* VIEW: LIVE FEED */}
         <div className={`h-full overflow-y-auto p-6 lg:p-10 scroll-smooth ${view === AppView.FEED ? 'block' : 'hidden'}`}>
             <div className="max-w-7xl mx-auto">
+
+                {/* Loading progress bar */}
+                {isFeedLoading && (
+                    <div className="mb-6 animate-fade-in">
+                        <div className="flex items-center justify-between mb-2">
+                            <span className="text-sm font-semibold text-slate-500 dark:text-slate-400">
+                                {loadingJournals.length > 0
+                                    ? `Fetching from ${loadingJournals.join(', ')}…`
+                                    : 'Curating papers…'}
+                            </span>
+                            {loadedCount > 0 && (
+                                <span className="text-xs font-bold text-academic-600">{loadedCount} loaded so far</span>
+                            )}
+                        </div>
+                        <div className="h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+                            <div className="h-full bg-academic-500 rounded-full animate-[shimmer_1.5s_infinite_linear] bg-gradient-to-r from-academic-400 via-academic-600 to-academic-400 bg-[length:200%_100%]" style={{ width: loadedCount > 0 ? `${Math.min(100, (loadedCount / feedLimit) * 100)}%` : '30%', transition: 'width 0.5s ease' }} />
+                        </div>
+                    </div>
+                )}
+
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
+                    {/* Always-visible Upload Card */}
+                    <UploadCard onUpload={() => { setStudioItem(null); setView(AppView.ANALYZE); }} />
+
+                    {/* Real paper cards */}
                     {feed.map((item, i) => (
-                        <FeedCard 
-                            key={i} 
-                            item={item} 
-                            onOpen={openInStudio} 
-                            onGenerateImage={handleGenerateImage} 
+                        <FeedCard
+                            key={i}
+                            item={item}
+                            onOpen={openInStudio}
+                            onGenerateImage={handleGenerateImage}
                             onSave={toggleSavePaper}
                             onCite={(paper) => setCiteItem(paper)}
                             isGeneratingImage={generatingImages.has(item.title)}
                             isSaved={settings.savedPapers.some(p => p.title === item.title)}
                         />
                     ))}
+
+                    {/* Skeleton cards while loading */}
+                    {isFeedLoading && Array.from({ length: Math.max(0, feedLimit - feed.length) }).map((_, i) => (
+                        <FeedCardSkeleton key={`sk-${i}`} />
+                    ))}
                 </div>
-                
-                {isFeedLoading && feed.length === 0 && (
-                    <div className="flex flex-col items-center justify-center py-20 opacity-50">
-                        <RefreshCw size={48} className="animate-spin mb-4" />
-                        <p>Curating papers...</p>
-                    </div>
-                )}
 
                 {feedError && !isFeedLoading && (
                     <div className="flex flex-col items-center justify-center py-20">
@@ -517,7 +628,7 @@ export default function App() {
                 )}
 
                 {!isFeedLoading && !feedError && feed.length === 0 && (
-                    <div className="flex flex-col items-center justify-center py-20 text-slate-400">
+                    <div className="col-span-4 flex flex-col items-center justify-center py-20 text-slate-400">
                         <BookOpen size={48} className="mb-4 opacity-30" />
                         <p className="font-medium">No papers found. Try adjusting your topic or date range.</p>
                     </div>
