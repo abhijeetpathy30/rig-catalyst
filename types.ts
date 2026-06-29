@@ -10,7 +10,16 @@ export enum AppView {
   FEED = 'FEED',
   ANALYZE = 'ANALYZE',
   CHAT = 'CHAT',
-  SETTINGS = 'SETTINGS'
+  SETTINGS = 'SETTINGS',
+  NOTEBOOK = 'NOTEBOOK',
+  FUSION_LAB = 'FUSION_LAB',
+}
+
+export interface FusionHypothesis {
+  type: 'INCREMENTAL' | 'DISRUPTIVE' | 'WILDCARD';
+  confidence: number;
+  title: string;
+  description: string;
 }
 
 export interface UserSettings {
