@@ -26,6 +26,43 @@ You are RIG Catalyst, an elite AI research companion for senior academics.
 - Propose novel, risky, but scientifically grounded combinations.
 `;
 
+export const POPULAR_JOURNALS = [
+  "Nature", "Science", "Cell", "Nature Medicine", "Nature Biotechnology",
+  "Nature Communications", "Nature Climate Change", "Nature Energy",
+  "Nature Genetics", "Nature Neuroscience", "Nature Methods",
+  "New England Journal of Medicine", "The Lancet", "JAMA", "BMJ",
+  "PNAS", "PLOS ONE", "eLife", "Current Biology", "Developmental Cell",
+  "Cancer Cell", "Immunity", "Neuron", "Cell Stem Cell", "Cell Reports",
+  "arXiv", "NeurIPS", "ICLR", "ICML", "CVPR", "ECCV", "ICCV", "ACL", "EMNLP",
+  "Physical Review Letters", "Physical Review X", "Advanced Materials",
+  "ACS Nano", "Journal of the American Chemical Society", "Angewandte Chemie",
+  "IEEE Transactions on Neural Networks", "ACM Computing Surveys",
+  "Bioinformatics", "Genome Research", "Genome Biology", "Nucleic Acids Research",
+  "Environmental Science & Technology", "Soil Biology and Biochemistry",
+  "Energy & Environmental Science", "Joule", "Applied Energy",
+  "Journal of Cleaner Production", "Science of the Total Environment",
+  "Frontiers in Neuroscience", "Frontiers in Psychology", "Frontiers in Medicine",
+];
+
+export const POPULAR_RESEARCH_AREAS = [
+  "Artificial Intelligence", "Machine Learning", "Deep Learning",
+  "Natural Language Processing", "Large Language Models", "Computer Vision",
+  "Reinforcement Learning", "Generative AI", "Graph Neural Networks",
+  "Robotics", "Autonomous Systems", "Human-Computer Interaction",
+  "Quantum Computing", "Quantum Physics", "Condensed Matter Physics",
+  "Molecular Biology", "Cell Biology", "Structural Biology", "Biochemistry",
+  "Neuroscience", "Cognitive Science", "Immunology", "Oncology",
+  "Genomics", "Proteomics", "CRISPR", "Synthetic Biology", "Epigenetics",
+  "Drug Discovery", "Pharmacology", "Clinical Trials", "Epidemiology", "Public Health",
+  "Climate Science", "Environmental Science", "Ecology", "Biodiversity",
+  "Materials Science", "Nanotechnology", "Photonics", "Semiconductors",
+  "Biochar", "Soil Science", "Agriculture", "Food Science",
+  "Renewable Energy", "Solar Energy", "Battery Technology", "Hydrogen Energy",
+  "Bioinformatics", "Computational Biology", "Systems Biology",
+  "Astrophysics", "Cosmology", "Organic Chemistry", "Polymer Science",
+  "Microbiome", "Virology", "Infectious Disease", "Vaccine Development",
+];
+
 export const MOCK_IMPACT_DATA = [
   { category: 'Novelty', score: 65, fullMark: 100 },
   { category: 'Feasibility', score: 60, fullMark: 100 },

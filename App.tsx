@@ -3,6 +3,7 @@ import {
   BookOpen, Search, Zap, PenTool, Settings, X, Send, Sparkles, ArrowRight, RefreshCw, Plus, Network, FileText, Image as ImageIcon, Bookmark, Share2, Trash2, Maximize2, Lightbulb, Calendar, Moon, Sun, AlertTriangle, Hash, FlaskConical, Layout, Upload, Link, User, ChevronDown, Check, Compass, Quote, Copy
 } from 'lucide-react';
 import { AppView, Message, UserSettings, FeedItem, Attachment, JournalSuggestion } from './types';
+import { POPULAR_JOURNALS, POPULAR_RESEARCH_AREAS } from './constants';
 import { initializeChat, sendMessage as sendGeminiMessage, fetchPapersFromJournal, analyzeContent, generateVisualAbstract, calculatePaperImpact, generatePaperSummary, suggestJournals } from './services/geminiService';
 import { MarkdownMessage } from './components/MarkdownMessage';
 import { SimpleChart } from './components/SimpleChart';
@@ -19,6 +20,68 @@ const DEFAULT_SETTINGS: UserSettings = {
 };
 
 // --- SUBCOMPONENTS ---
+
+// --- AUTOCOMPLETE INPUT ---
+interface AutocompleteInputProps {
+  value: string;
+  onChange: (v: string) => void;
+  onSelect: (v: string) => void;
+  onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void;
+  onBlur?: () => void;
+  suggestions: string[];
+  placeholder: string;
+  className?: string;
+  autoFocus?: boolean;
+}
+const AutocompleteInput: React.FC<AutocompleteInputProps> = ({
+  value, onChange, onSelect, onKeyDown, onBlur, suggestions, placeholder, className, autoFocus
+}) => {
+  const [show, setShow] = React.useState(false);
+  const filtered = value.length > 0
+    ? suggestions.filter(s => s.toLowerCase().includes(value.toLowerCase())).slice(0, 8)
+    : suggestions.slice(0, 6);
+
+  return (
+    <div className="relative w-full">
+      <input
+        autoFocus={autoFocus}
+        value={value}
+        onChange={e => { onChange(e.target.value); setShow(true); }}
+        onFocus={() => setShow(true)}
+        onBlur={() => { setTimeout(() => setShow(false), 150); onBlur?.(); }}
+        onKeyDown={onKeyDown}
+        placeholder={placeholder}
+        className={className}
+      />
+      {show && filtered.length > 0 && (
+        <div className="absolute top-full left-0 mt-1 min-w-[200px] w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl z-[100] max-h-52 overflow-y-auto">
+          {value.length === 0 && (
+            <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-100 dark:border-slate-700">Popular</div>
+          )}
+          {filtered.map(s => (
+            <button
+              key={s}
+              onMouseDown={() => { onSelect(s); setShow(false); }}
+              className="w-full text-left px-3 py-2 text-sm hover:bg-academic-50 dark:hover:bg-academic-900/20 hover:text-academic-600 dark:hover:text-academic-300 transition-colors text-slate-700 dark:text-slate-200"
+            >
+              {value.length > 0 ? (
+                <>
+                  <span className="font-bold text-academic-600 dark:text-academic-400">
+                    {s.substring(0, s.toLowerCase().indexOf(value.toLowerCase()))}
+                  </span>
+                  <span className="font-bold text-academic-600 dark:text-academic-400">
+                    {s.substring(s.toLowerCase().indexOf(value.toLowerCase()), s.toLowerCase().indexOf(value.toLowerCase()) + value.length)}
+                  </span>
+                  <span>{s.substring(s.toLowerCase().indexOf(value.toLowerCase()) + value.length)}</span>
+                </>
+              ) : s}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const FeedCardSkeleton: React.FC = () => (
   <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-100 dark:border-slate-700 shadow-sm overflow-hidden flex flex-col animate-pulse">
@@ -120,7 +183,9 @@ export default function App() {
   const [loadedCount, setLoadedCount] = useState(0);
 
   // Feed Filters (Header)
-  const [feedTopic, setFeedTopic] = useState(DEFAULT_SETTINGS.field);
+  const [feedTopics, setFeedTopics] = useState<string[]>([DEFAULT_SETTINGS.field]);
+  const [addTopicInput, setAddTopicInput] = useState('');
+  const [showAddTopic, setShowAddTopic] = useState(false);
   const [feedJournals, setFeedJournals] = useState<string>(DEFAULT_SETTINGS.trackedJournals.join(', '));
   const [feedDateCutoff, setFeedDateCutoff] = useState(() => { const d = new Date(); d.setDate(d.getDate() - 90); return d.toISOString().split('T')[0]; });
   const [feedLimit, setFeedLimit] = useState(8);
@@ -188,7 +253,7 @@ export default function App() {
   // -- JOURNAL DISCOVERY LOGIC --
   
   const handleDiscoverJournals = async () => {
-      const topic = journalDiscoveryTopic || feedTopic || settings.field;
+      const topic = journalDiscoveryTopic || feedTopics[0] || settings.field;
       setIsSuggestingJournals(true);
       try {
           const suggestions = await suggestJournals(topic);
@@ -223,6 +288,7 @@ export default function App() {
     setLoadedCount(0);
 
     const journals = feedJournals.split(',').map(s => s.trim()).filter(Boolean);
+    const topicQuery = feedTopics.join(', ');
     const perJournal = Math.max(1, Math.ceil(feedLimit / journals.length));
     setLoadingJournals(journals);
 
@@ -230,7 +296,7 @@ export default function App() {
       // Fetch all journals in parallel — each gets its own dedicated request
       const results = await Promise.allSettled(
         journals.map(journal =>
-          fetchPapersFromJournal(journal, feedTopic, feedDateCutoff, perJournal)
+          fetchPapersFromJournal(journal, topicQuery, feedDateCutoff, perJournal)
             .then(papers => {
               // Stream results in as each journal completes
               if (papers.length > 0) {
@@ -250,6 +316,18 @@ export default function App() {
       setIsFeedLoading(false);
       setLoadingJournals([]);
     }
+  };
+
+  const addTopic = (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setFeedTopics(prev => prev.some(t => t.toLowerCase() === trimmed.toLowerCase()) ? prev : [...prev, trimmed]);
+    setAddTopicInput('');
+    setShowAddTopic(false);
+  };
+
+  const removeTopic = (name: string) => {
+    setFeedTopics(prev => prev.filter(t => t !== name));
   };
 
   const addJournal = (name: string) => {
@@ -434,15 +512,38 @@ export default function App() {
         {view === AppView.FEED && (
             <div className="px-6 py-3 bg-slate-50 dark:bg-slate-900/50 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center gap-4 text-sm animate-fade-in relative">
                 
-                {/* 1. FOCUS INPUT */}
-                <div className="flex items-center gap-2 flex-1 min-w-[200px]">
-                    <Search size={14} className="text-slate-400" />
-                    <span className="font-semibold text-slate-500 text-xs uppercase tracking-wide">Focus</span>
-                    <input 
-                        value={feedTopic} 
-                        onChange={(e) => { setFeedTopic(e.target.value); setJournalDiscoveryTopic(e.target.value); }} 
-                        className="bg-transparent border-b border-slate-300 dark:border-slate-600 focus:border-academic-500 outline-none w-full text-slate-800 dark:text-slate-200 font-medium py-1" 
-                    />
+                {/* 1. FOCUS CHIPS (multi-topic) */}
+                <div className="flex items-start gap-2 flex-1 min-w-[250px]">
+                    <Search size={14} className="text-slate-400 mt-1.5 shrink-0" />
+                    <div className="flex-1">
+                      <div className="flex flex-wrap gap-1.5 items-center">
+                        {feedTopics.map(t => (
+                          <span key={t} className="flex items-center gap-1 px-2 py-0.5 bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-full text-xs font-semibold">
+                            {t}
+                            {feedTopics.length > 1 && (
+                              <button onClick={() => removeTopic(t)} className="hover:text-red-500 transition-colors ml-0.5"><X size={10} /></button>
+                            )}
+                          </span>
+                        ))}
+                        {showAddTopic ? (
+                          <AutocompleteInput
+                            autoFocus
+                            value={addTopicInput}
+                            onChange={setAddTopicInput}
+                            onSelect={addTopic}
+                            onKeyDown={e => { if (e.key === 'Enter') addTopic(addTopicInput); if (e.key === 'Escape') { setShowAddTopic(false); setAddTopicInput(''); } }}
+                            onBlur={() => { if (!addTopicInput) setShowAddTopic(false); }}
+                            suggestions={POPULAR_RESEARCH_AREAS}
+                            placeholder="e.g. Quantum Computing"
+                            className="px-2 py-0.5 bg-white dark:bg-slate-800 border border-slate-400 rounded-full text-xs outline-none w-44 text-slate-800 dark:text-slate-200"
+                          />
+                        ) : (
+                          <button onClick={() => setShowAddTopic(true)} className="flex items-center gap-0.5 px-2 py-0.5 border border-dashed border-slate-300 dark:border-slate-600 text-slate-400 hover:text-slate-700 hover:border-slate-400 rounded-full text-xs transition-colors">
+                            <Plus size={10} /> Add Topic
+                          </button>
+                        )}
+                      </div>
+                    </div>
                 </div>
                 
                 {/* 2. JOURNAL CHIPS + ADD */}
@@ -457,14 +558,16 @@ export default function App() {
                           </span>
                         ))}
                         {showAddJournal ? (
-                          <input
+                          <AutocompleteInput
                             autoFocus
                             value={addJournalInput}
-                            onChange={e => setAddJournalInput(e.target.value)}
-                            onKeyDown={e => { if (e.key === 'Enter') addJournal(addJournalInput); if (e.key === 'Escape') setShowAddJournal(false); }}
+                            onChange={setAddJournalInput}
+                            onSelect={addJournal}
+                            onKeyDown={e => { if (e.key === 'Enter') addJournal(addJournalInput); if (e.key === 'Escape') { setShowAddJournal(false); setAddJournalInput(''); } }}
                             onBlur={() => { if (!addJournalInput) setShowAddJournal(false); }}
+                            suggestions={POPULAR_JOURNALS}
                             placeholder="Journal name..."
-                            className="px-2 py-0.5 bg-white dark:bg-slate-800 border border-academic-400 rounded-full text-xs outline-none w-32 text-slate-800 dark:text-slate-200"
+                            className="px-2 py-0.5 bg-white dark:bg-slate-800 border border-academic-400 rounded-full text-xs outline-none w-40 text-slate-800 dark:text-slate-200"
                           />
                         ) : (
                           <button onClick={() => setShowAddJournal(true)} className="flex items-center gap-0.5 px-2 py-0.5 border border-dashed border-slate-300 dark:border-slate-600 text-slate-400 hover:text-academic-500 hover:border-academic-400 rounded-full text-xs transition-colors">
