@@ -29,6 +29,20 @@ export interface UserSettings {
   creativityMode: number; // 0.0 to 1.0
   trackedJournals: string[];
   savedPapers: FeedItem[];
+  technicalBio?: string;
+  enhancedAnalysisMode?: boolean;
+}
+
+export interface ChallengeStressTest {
+  title: string;
+  description: string;
+  color: 'cyan' | 'amber' | 'rose';
+}
+
+export interface PrimaryHurdle {
+  name: string;
+  percent: number;
+  color: 'cyan' | 'amber' | 'rose';
 }
 
 export interface ImpactMetric {
