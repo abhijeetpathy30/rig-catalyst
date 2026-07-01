@@ -173,7 +173,7 @@ export default function App() {
   const [showAddTopic, setShowAddTopic] = useState(false);
   const [feedJournals, setFeedJournals] = useState<string>(DEFAULT_SETTINGS.trackedJournals.join(', '));
   const [feedDateCutoff, setFeedDateCutoff] = useState(() => {
-    const d = new Date(); d.setDate(d.getDate() - 90); return d.toISOString().split('T')[0];
+    const d = new Date(); d.setFullYear(d.getFullYear() - 1); return d.toISOString().split('T')[0];
   });
   const [feedLimit, setFeedLimit] = useState(8);
   const [addJournalInput, setAddJournalInput] = useState('');
@@ -844,14 +844,27 @@ Return ONLY valid JSON (no markdown):
                   {isFeedLoading && Array.from({ length: Math.max(0, feedLimit - feed.length) }).map((_, i) => <FeedCardSkeleton key={`sk-${i}`} />)}
                 </div>
                 {feedError && !isFeedLoading && (
-                  <div className="flex flex-col items-center justify-center py-20">
-                    <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-8 max-w-lg text-center">
-                      <AlertTriangle size={36} className="text-red-400 mx-auto mb-4" />
-                      <h3 className="font-bold text-red-400 mb-2">Failed to Load Feed</h3>
-                      <p className="text-red-400/70 text-sm mb-4">{feedError}</p>
-                      <button onClick={loadFeed} className="px-5 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-bold text-sm flex items-center gap-2 mx-auto">
-                        <RefreshCw size={13} /> Retry
-                      </button>
+                  <div className="col-span-full flex flex-col items-center justify-center py-16">
+                    <div className="bg-slate-800/60 border border-slate-700/50 rounded-2xl p-8 max-w-lg w-full text-center">
+                      <AlertTriangle size={32} className="text-amber-400 mx-auto mb-4" />
+                      <h3 className="font-bold text-slate-100 mb-2">No Papers Found</h3>
+                      <p className="text-slate-400 text-sm mb-5">{feedError}</p>
+                      <div className="text-left bg-slate-900/50 rounded-xl p-4 mb-5 space-y-2">
+                        <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500 mb-3">Quick Fixes</p>
+                        <button onClick={() => { const d = new Date(); d.setFullYear(d.getFullYear() - 2); setFeedDateCutoff(d.toISOString().split('T')[0]); setTimeout(loadFeed, 100); }}
+                          className="w-full text-left px-3 py-2 text-sm text-slate-300 hover:text-cyan-400 hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-2">
+                          <ArrowRight size={12} className="text-cyan-500 shrink-0" /> Widen date range to 2 years
+                        </button>
+                        <button onClick={() => { setFeedTopics(['Artificial Intelligence']); setFeedJournals('Nature, Science, arXiv'); setTimeout(loadFeed, 100); }}
+                          className="w-full text-left px-3 py-2 text-sm text-slate-300 hover:text-cyan-400 hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-2">
+                          <ArrowRight size={12} className="text-cyan-500 shrink-0" /> Reset to AI / arXiv defaults
+                        </button>
+                        <button onClick={loadFeed}
+                          className="w-full text-left px-3 py-2 text-sm text-slate-300 hover:text-cyan-400 hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-2">
+                          <RefreshCw size={12} className="text-cyan-500 shrink-0" /> Retry with same settings
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-slate-600">Tip: Niche topics work best with field-specific journals (e.g. "Geoderma" for soil science) rather than broad ones like Nature or Science.</p>
                     </div>
                   </div>
                 )}

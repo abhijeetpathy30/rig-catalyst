@@ -223,33 +223,82 @@ export const sendMessage = async (message: string): Promise<string> => {
 export const fetchPapersFromJournal = async (
   journal: string, topic: string, dateCutoff: string, count: number
 ): Promise<FeedItem[]> => {
-  const prompt = `Find ${count} recent academic papers about "${topic}" published in "${journal}" after ${dateCutoff}.
-Return STRICT JSON array ONLY. Start response with "[". No preamble.
-[{"title":"Exact paper title","authors":"Last, F. & Last, F.","journal":"${journal}","date":"YYYY-MM-DD","link":"https://...","summary":"2-sentence plain English summary."}]
-If fewer than ${count} found, return what's available. If none found, return [].`;
+  // Prompt used for both grounded (Gemini) and plain (OpenAI/OR) calls
+  const buildPrompt = (withGrounding: boolean) => `
+You are a research librarian with access to academic databases.
+Find ${count} real, published academic papers about "${topic}" from "${journal}" published after ${dateCutoff}.
+
+Rules:
+- Only include papers that ACTUALLY exist. Do not fabricate.
+- If grounding/search is available, use it to verify titles and links.
+- Each paper must have a real DOI or URL when possible.
+- Date format: YYYY-MM-DD
+
+Return ONLY a JSON array starting with "[". No markdown, no preamble.
+[
+  {
+    "title": "Exact published paper title",
+    "authors": "Last, F. & Last, F.",
+    "journal": "${journal}",
+    "date": "YYYY-MM-DD",
+    "link": "https://doi.org/... or journal URL",
+    "summary": "2 plain-English sentences: what was studied and what was found."
+  }
+]
+If fewer than ${count} papers are found, return what's available. If none, return [].`.trim();
+
+  const parseResponse = (text: string): FeedItem[] => {
+    const jsonString = extractJSON(text);
+    if (!jsonString) {
+      console.warn(`[Feed] No JSON found in response for ${journal}:`, text?.substring(0, 200));
+      return [];
+    }
+    try {
+      const items = JSON.parse(jsonString) as FeedItem[];
+      return items.filter(i => i.title && i.summary && i.title.length > 5).slice(0, count);
+    } catch (e) {
+      console.warn(`[Feed] JSON parse failed for ${journal}:`, e);
+      return [];
+    }
+  };
 
   if (isGemini()) {
-    return withRetry(async () => {
-      try {
-        const response = await getGemini().models.generateContent({
-          model: activeModel(),
-          contents: prompt,
-          config: { tools: [{ googleSearch: {} }] }
-        });
-        const jsonString = extractJSON(response.text || "[]");
-        if (!jsonString) return [];
-        return (JSON.parse(jsonString) as FeedItem[]).filter(i => i.title && i.summary).slice(0, count);
-      } catch (e) { console.error(`Failed to fetch from ${journal}`, e); return []; }
-    }, 2, 3000);
+    // Try with Google Search grounding first
+    try {
+      const response = await withRetry(async () => getGemini().models.generateContent({
+        model: activeModel(),
+        contents: buildPrompt(true),
+        config: { tools: [{ googleSearch: {} }] }
+      }), 2, 3000);
+      const results = parseResponse(response.text || '');
+      if (results.length > 0) return results;
+      console.warn(`[Feed] Grounded search returned 0 papers for "${journal}" / "${topic}". Trying without grounding…`);
+    } catch (e: any) {
+      console.warn(`[Feed] Grounded search error for ${journal}:`, e?.message || e);
+    }
+
+    // Fallback: no grounding (model uses its training knowledge)
+    try {
+      const response = await withRetry(async () => getGemini().models.generateContent({
+        model: activeModel(),
+        contents: buildPrompt(false),
+      }), 1, 2000);
+      return parseResponse(response.text || '');
+    } catch (e: any) {
+      console.error(`[Feed] Both grounded and ungrounded fetch failed for ${journal}:`, e?.message || e);
+      return [];
+    }
   } else {
-    return withRetry(async () => {
-      try {
-        const reply = await callOAI([{ role: 'user', content: prompt }], 0.3);
-        const jsonString = extractJSON(reply);
-        if (!jsonString) return [];
-        return (JSON.parse(jsonString) as FeedItem[]).filter(i => i.title && i.summary).slice(0, count);
-      } catch (e) { console.error(`Failed to fetch from ${journal}`, e); return []; }
-    }, 2, 3000);
+    try {
+      const reply = await withRetry(
+        () => callOAI([{ role: 'user', content: buildPrompt(false) }], 0.3),
+        2, 3000
+      );
+      return parseResponse(reply);
+    } catch (e: any) {
+      console.error(`[Feed] OpenAI/OR fetch failed for ${journal}:`, e?.message || e);
+      return [];
+    }
   }
 };
 
