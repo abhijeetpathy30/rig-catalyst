@@ -7,13 +7,14 @@ import {
 } from 'lucide-react';
 import {
   AppView, Message, UserSettings, FeedItem, Attachment, JournalSuggestion,
-  FusionHypothesis, ChallengeStressTest, PrimaryHurdle
+  FusionHypothesis, ChallengeStressTest, PrimaryHurdle,
+  LLMConfig, LLMProvider, PROVIDER_LABELS, PROVIDER_MODELS, PROVIDER_KEY_URLS, PROVIDER_DESCRIPTIONS
 } from './types';
 import { POPULAR_JOURNALS, POPULAR_RESEARCH_AREAS } from './constants';
 import {
   initializeChat, sendMessage as sendGeminiMessage, fetchPapersFromJournal,
   analyzeContent, generateVisualAbstract, calculatePaperImpact,
-  generatePaperSummary, suggestJournals
+  generatePaperSummary, suggestJournals, setLLMConfig, testConnection, getLLMConfig
 } from './services/geminiService';
 import { MarkdownMessage } from './components/MarkdownMessage';
 import { SimpleChart } from './components/SimpleChart';
@@ -220,6 +221,17 @@ export default function App() {
   // ── Settings pending edits
   const [pendingSettings, setPendingSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
 
+  // ── LLM Provider Config (BYOK)
+  const [llmConfig, setLlmConfigState] = useState<LLMConfig | null>(null);
+  const [showSetupModal, setShowSetupModal] = useState(false);
+  const [setupProvider, setSetupProvider] = useState<LLMProvider>('gemini');
+  const [setupApiKey, setSetupApiKey] = useState('');
+  const [setupModel, setSetupModel] = useState('gemini-2.5-flash');
+  const [setupShowKey, setSetupShowKey] = useState(false);
+  const [isTestingConn, setIsTestingConn] = useState(false);
+  const [connTestResult, setConnTestResult] = useState<'idle' | 'ok' | 'error'>('idle');
+  const [connTestError, setConnTestError] = useState('');
+
   // ────────────────────────────────────────────────────────────────────────────
   // EFFECTS
   // ────────────────────────────────────────────────────────────────────────────
@@ -230,6 +242,22 @@ export default function App() {
   }, [darkMode]);
 
   useEffect(() => {
+    // Load LLM config from localStorage
+    try {
+      const stored = localStorage.getItem('rig_llm_config');
+      if (stored) {
+        const cfg: LLMConfig = JSON.parse(stored);
+        setLlmConfigState(cfg);
+        setLLMConfig(cfg);
+        setSetupProvider(cfg.provider);
+        setSetupApiKey(cfg.apiKey);
+        setSetupModel(cfg.model);
+      } else {
+        // No stored config — check if env var key is available (dev mode / Vercel deploy with key)
+        const hasEnvKey = !!(process.env as any).API_KEY || !!(process.env as any).GEMINI_API_KEY;
+        if (!hasEnvKey) setShowSetupModal(true);
+      }
+    } catch {}
     initializeChat(settings);
     loadFeed();
   }, []);
@@ -470,11 +498,45 @@ Return ONLY valid JSON (no markdown):
 
   const saveSettings = () => setSettings({ ...pendingSettings });
 
+  const handleSaveLLMConfig = (provider: LLMProvider, apiKey: string, model: string) => {
+    const cfg: LLMConfig = { provider, apiKey, model };
+    setLlmConfigState(cfg);
+    setLLMConfig(cfg);
+    localStorage.setItem('rig_llm_config', JSON.stringify(cfg));
+    // Re-init chat with new provider
+    initializeChat(settings);
+    setConnTestResult('idle');
+    setShowSetupModal(false);
+  };
+
+  const handleTestConnection = async () => {
+    if (!setupApiKey.trim()) return;
+    setIsTestingConn(true);
+    setConnTestResult('idle');
+    setConnTestError('');
+    const result = await testConnection({ provider: setupProvider, apiKey: setupApiKey, model: setupModel });
+    setIsTestingConn(false);
+    if (result.ok) {
+      setConnTestResult('ok');
+    } else {
+      setConnTestResult('error');
+      setConnTestError(result.error || 'Connection failed');
+    }
+  };
+
+  const handleProviderChange = (p: LLMProvider) => {
+    setSetupProvider(p);
+    setSetupModel(PROVIDER_MODELS[p][0].id);
+    setConnTestResult('idle');
+    setConnTestError('');
+  };
+
   // ────────────────────────────────────────────────────────────────────────────
   // RENDER
   // ────────────────────────────────────────────────────────────────────────────
 
-  const apiKeyMissing = !process.env.API_KEY && !process.env.GEMINI_API_KEY;
+  const apiKeyMissing = !llmConfig && !process.env.API_KEY && !process.env.GEMINI_API_KEY;
+  const nonGeminiProvider = llmConfig && llmConfig.provider !== 'gemini';
   const journalList = feedJournals.split(',').map(s => s.trim()).filter(Boolean);
 
   const NAV_ITEMS = [
@@ -606,6 +668,14 @@ Return ONLY valid JSON (no markdown):
             </div>
 
             <div className="flex items-center gap-1 ml-auto">
+              {/* Active LLM badge */}
+              <button onClick={() => setShowSetupModal(true)}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-700 hover:border-slate-600 text-xs text-slate-400 hover:text-slate-200 transition-all mr-1">
+                <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full shrink-0" />
+                {llmConfig ? PROVIDER_LABELS[llmConfig.provider] : 'Gemini (default)'}
+                <span className="text-slate-600">·</span>
+                <span className="font-mono text-[10px] text-slate-500">{llmConfig?.model?.split('/').pop()?.replace('gemini-', 'g-') || 'g-2.5-flash'}</span>
+              </button>
               <button className="p-2 text-slate-500 hover:text-slate-300 transition-colors" title="History"><Clock size={16} /></button>
               <button className="p-2 text-slate-500 hover:text-slate-300 transition-colors" title="Notifications"><Bell size={16} /></button>
               <button onClick={() => setDarkMode(!darkMode)} className="p-2 text-slate-400 hover:text-slate-200 transition-colors">
@@ -616,6 +686,17 @@ Return ONLY valid JSON (no markdown):
               </div>
             </div>
           </header>
+
+          {/* ── NON-GEMINI FEED WARNING ──────────────────────────────────── */}
+          {view === AppView.FEED && nonGeminiProvider && (
+            <div className="shrink-0 flex items-center gap-3 px-6 py-2 bg-amber-500/10 border-b border-amber-500/20">
+              <AlertTriangle size={13} className="text-amber-400 shrink-0" />
+              <span className="text-amber-300 text-xs">
+                Using <strong>{PROVIDER_LABELS[llmConfig!.provider]}</strong> — live paper search works best with Gemini (Google grounding). Papers shown may be AI-generated estimates.
+              </span>
+              <button onClick={() => setShowSetupModal(true)} className="ml-auto text-xs text-amber-400 hover:text-amber-300 underline underline-offset-2 shrink-0">Switch Provider</button>
+            </div>
+          )}
 
           {/* ── FEED CONTROLS (Feed only) ─────────────────────────────────── */}
           {view === AppView.FEED && (
@@ -1284,7 +1365,100 @@ Return ONLY valid JSON (no markdown):
                   {/* ── Left column (2/3) */}
                   <div className="lg:col-span-2 space-y-5">
 
-                    {/* Personalization */}
+                    {/* LLM Provider Card */}
+                    <div className="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6">
+                      <div className="flex items-center justify-between mb-5">
+                        <h3 className="font-bold text-slate-100 flex items-center gap-2">
+                          <Zap size={16} className="text-amber-400" /> AI Provider
+                        </h3>
+                        {llmConfig && (
+                          <span className="flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-full font-medium">
+                            <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
+                            {PROVIDER_LABELS[llmConfig.provider]} · {llmConfig.model.split('/').pop()}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Provider selector */}
+                      <div className="grid grid-cols-3 gap-2 mb-5">
+                        {(['gemini', 'openai', 'openrouter'] as LLMProvider[]).map(p => (
+                          <button key={p} onClick={() => handleProviderChange(p)}
+                            className={`p-3 rounded-xl border text-left transition-all ${setupProvider === p ? 'border-amber-500/60 bg-amber-500/10' : 'border-slate-700/50 hover:border-slate-600 bg-slate-900/40'}`}>
+                            <div className={`text-sm font-bold mb-0.5 ${setupProvider === p ? 'text-amber-300' : 'text-slate-300'}`}>{PROVIDER_LABELS[p]}</div>
+                            <div className="text-[10px] text-slate-500 leading-snug">{PROVIDER_DESCRIPTIONS[p]}</div>
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Model selector */}
+                      <div className="mb-4">
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-2">Model</label>
+                        <select value={setupModel} onChange={e => { setSetupModel(e.target.value); setConnTestResult('idle'); }}
+                          className="w-full p-3 bg-slate-900/60 border border-slate-700/50 rounded-xl text-slate-200 text-sm outline-none focus:border-amber-500 transition-colors">
+                          {PROVIDER_MODELS[setupProvider].map(m => (
+                            <option key={m.id} value={m.id}>{m.label}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* API Key input */}
+                      <div className="mb-4">
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="text-[10px] font-bold uppercase tracking-widest text-slate-500">API Key</label>
+                          <a href={PROVIDER_KEY_URLS[setupProvider]} target="_blank" rel="noreferrer"
+                            className="text-[10px] text-cyan-400 hover:text-cyan-300 underline underline-offset-2">
+                            Get your key →
+                          </a>
+                        </div>
+                        <div className="relative">
+                          <input
+                            type={setupShowKey ? 'text' : 'password'}
+                            value={setupApiKey}
+                            onChange={e => { setSetupApiKey(e.target.value); setConnTestResult('idle'); }}
+                            placeholder={`Paste your ${PROVIDER_LABELS[setupProvider]} API key…`}
+                            className="w-full p-3 pr-20 bg-slate-900/60 border border-slate-700/50 rounded-xl text-slate-200 text-sm outline-none focus:border-amber-500 transition-colors font-mono placeholder-slate-600"
+                          />
+                          <button onClick={() => setSetupShowKey(v => !v)}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] text-slate-500 hover:text-slate-300 transition-colors">
+                            {setupShowKey ? 'Hide' : 'Show'}
+                          </button>
+                        </div>
+                        <p className="text-[10px] text-slate-600 mt-1.5">
+                          🔒 Your key is stored only in your browser's localStorage and never sent to our servers.
+                        </p>
+                      </div>
+
+                      {/* Test + Save buttons */}
+                      <div className="flex items-center gap-3">
+                        <button onClick={handleTestConnection} disabled={!setupApiKey.trim() || isTestingConn}
+                          className="px-4 py-2 border border-slate-600 hover:border-slate-500 text-slate-300 rounded-xl text-sm font-medium disabled:opacity-40 flex items-center gap-2 transition-colors">
+                          {isTestingConn ? <RefreshCw size={13} className="animate-spin" /> : <Check size={13} />}
+                          Test Connection
+                        </button>
+                        {connTestResult === 'ok' && <span className="text-sm text-emerald-400 font-medium flex items-center gap-1.5"><Check size={13} /> Connected!</span>}
+                        {connTestResult === 'error' && <span className="text-sm text-rose-400 flex items-center gap-1.5"><AlertTriangle size={13} /> {connTestError}</span>}
+                        <button
+                          onClick={() => handleSaveLLMConfig(setupProvider, setupApiKey, setupModel)}
+                          disabled={!setupApiKey.trim()}
+                          className="ml-auto px-5 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-900 rounded-xl text-sm font-bold transition-colors">
+                          Save Provider
+                        </button>
+                      </div>
+
+                      {llmConfig && (
+                        <button onClick={() => {
+                          localStorage.removeItem('rig_llm_config');
+                          setLlmConfigState(null);
+                          setLLMConfig(null);
+                          setSetupApiKey('');
+                          setConnTestResult('idle');
+                        }} className="mt-3 text-xs text-slate-600 hover:text-rose-400 transition-colors">
+                          Clear saved key
+                        </button>
+                      )}
+                    </div>
+
+                  {/* Personalization */}
                     <div className="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6">
                       <h3 className="font-bold text-slate-100 flex items-center gap-2 mb-5">
                         <User size={16} className="text-cyan-400" /> Personalization
@@ -1443,6 +1617,117 @@ Return ONLY valid JSON (no markdown):
           title="Open AI Chat">
           <Sparkles size={20} />
         </button>
+
+        {/* ══ SETUP MODAL ════════════════════════════════════════════════════ */}
+        {showSetupModal && (
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[300] flex items-center justify-center p-4">
+            <div className="bg-[#0d1421] border border-slate-700 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden">
+
+              {/* Header */}
+              <div className="px-7 pt-7 pb-5 border-b border-slate-800">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className="p-1.5 bg-amber-500/20 rounded-lg"><Zap size={14} className="text-amber-400" /></div>
+                      <h2 className="text-xl font-bold text-slate-100">Configure Your AI Provider</h2>
+                    </div>
+                    <p className="text-slate-400 text-sm">Bring your own API key — it stays in your browser, never on our servers.</p>
+                  </div>
+                  <button onClick={() => setShowSetupModal(false)} className="p-1.5 text-slate-500 hover:text-slate-300 hover:bg-slate-800 rounded-lg transition-colors mt-0.5">
+                    <X size={16} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="px-7 py-5 space-y-5">
+                {/* Provider selector */}
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-2">Choose Provider</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(['gemini', 'openai', 'openrouter'] as LLMProvider[]).map(p => (
+                      <button key={p} onClick={() => handleProviderChange(p)}
+                        className={`p-3.5 rounded-xl border text-left transition-all ${setupProvider === p ? 'border-amber-500/60 bg-amber-500/10' : 'border-slate-700 hover:border-slate-600 bg-slate-900/60'}`}>
+                        <div className={`text-sm font-bold mb-1 ${setupProvider === p ? 'text-amber-300' : 'text-slate-300'}`}>{PROVIDER_LABELS[p]}</div>
+                        <div className="text-[10px] text-slate-500 leading-snug">{PROVIDER_DESCRIPTIONS[p]}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Model */}
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-2">Model</label>
+                  <select value={setupModel} onChange={e => setSetupModel(e.target.value)}
+                    className="w-full p-3 bg-slate-900 border border-slate-700 rounded-xl text-slate-200 text-sm outline-none focus:border-amber-500 transition-colors">
+                    {PROVIDER_MODELS[setupProvider].map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                  </select>
+                </div>
+
+                {/* API Key */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-slate-500">API Key</label>
+                    <a href={PROVIDER_KEY_URLS[setupProvider]} target="_blank" rel="noreferrer"
+                      className="text-[10px] text-cyan-400 hover:text-cyan-300 underline underline-offset-2">
+                      Get a free key →
+                    </a>
+                  </div>
+                  <div className="relative">
+                    <input
+                      type={setupShowKey ? 'text' : 'password'}
+                      value={setupApiKey}
+                      onChange={e => { setSetupApiKey(e.target.value); setConnTestResult('idle'); }}
+                      placeholder={`Your ${PROVIDER_LABELS[setupProvider]} API key…`}
+                      autoFocus
+                      className="w-full p-3.5 pr-20 bg-slate-900 border border-slate-700 rounded-xl text-slate-200 text-sm outline-none focus:border-amber-500 transition-colors font-mono placeholder-slate-600"
+                    />
+                    <button onClick={() => setSetupShowKey(v => !v)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] text-slate-500 hover:text-slate-300 transition-colors px-1">
+                      {setupShowKey ? 'Hide' : 'Show'}
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-600 mt-1.5">🔒 Stored only in your browser's localStorage. Never transmitted to our servers.</p>
+                </div>
+
+                {/* Connection test result */}
+                {connTestResult === 'ok' && (
+                  <div className="flex items-center gap-2 p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl">
+                    <Check size={14} className="text-emerald-400 shrink-0" />
+                    <span className="text-emerald-300 text-sm font-medium">Connection successful! Your key is valid.</span>
+                  </div>
+                )}
+                {connTestResult === 'error' && (
+                  <div className="flex items-start gap-2 p-3 bg-rose-500/10 border border-rose-500/20 rounded-xl">
+                    <AlertTriangle size={14} className="text-rose-400 shrink-0 mt-0.5" />
+                    <span className="text-rose-300 text-sm">{connTestError}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer actions */}
+              <div className="px-7 pb-7 flex items-center gap-3">
+                <button onClick={handleTestConnection} disabled={!setupApiKey.trim() || isTestingConn}
+                  className="px-4 py-2.5 border border-slate-700 hover:border-slate-500 text-slate-300 rounded-xl text-sm font-medium disabled:opacity-40 flex items-center gap-2 transition-colors">
+                  {isTestingConn ? <RefreshCw size={13} className="animate-spin" /> : <Check size={13} />}
+                  Test Connection
+                </button>
+                <button
+                  onClick={() => handleSaveLLMConfig(setupProvider, setupApiKey, setupModel)}
+                  disabled={!setupApiKey.trim() || connTestResult === 'error'}
+                  className="flex-1 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-900 rounded-xl text-sm font-black transition-colors">
+                  Save & Start Using RIG
+                </button>
+              </div>
+
+              {/* Skip */}
+              <div className="text-center pb-4">
+                <button onClick={() => setShowSetupModal(false)} className="text-xs text-slate-600 hover:text-slate-400 transition-colors">
+                  Skip for now (uses default key if available)
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <CitationModal item={citeItem} onClose={() => setCiteItem(null)} />
       </div>

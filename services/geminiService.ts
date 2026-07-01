@@ -1,496 +1,533 @@
 import { GoogleGenAI, Chat } from "@google/genai";
 import { SYSTEM_PROMPT } from "../constants";
-import { UserSettings, Attachment, FeedItem, ImpactMetric, JournalSuggestion } from "../types";
+import {
+  UserSettings, Attachment, FeedItem, ImpactMetric, JournalSuggestion,
+  LLMConfig, LLMProvider
+} from "../types";
 
-let chatSession: Chat | null = null;
-let genAI: GoogleGenAI | null = null;
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE-LEVEL STATE
+// ─────────────────────────────────────────────────────────────────────────────
 
-const getAI = (): GoogleGenAI => {
-  if (!genAI) {
-    genAI = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  }
-  return genAI;
+let _cfg: LLMConfig | null = null;
+let _geminiClient: GoogleGenAI | null = null;
+let _geminiChat: Chat | null = null;
+// For non-Gemini providers we keep a flat message history
+let _oaiHistory: { role: string; content: string }[] = [];
+
+// ── Config Management ─────────────────────────────────────────────────────────
+
+export const setLLMConfig = (cfg: LLMConfig | null) => {
+  _cfg = cfg;
+  _geminiClient = null;
+  _geminiChat = null;
+  _oaiHistory = [];
 };
 
-/**
- * Utility to retry operations with exponential backoff on rate limits
- */
-const withRetry = async <T>(operation: () => Promise<T>, retries = 3, delay = 4000): Promise<T> => {
+export const getLLMConfig = (): LLMConfig | null => _cfg;
+
+const provider = (): LLMProvider => _cfg?.provider || 'gemini';
+const activeModel = (): string => _cfg?.model || 'gemini-2.5-flash';
+const activeKey = (): string => _cfg?.apiKey || (process.env as any).API_KEY || (process.env as any).GEMINI_API_KEY || '';
+const isGemini = (): boolean => provider() === 'gemini';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GEMINI CLIENT
+// ─────────────────────────────────────────────────────────────────────────────
+
+const getGemini = (): GoogleGenAI => {
+  if (!_geminiClient) {
+    const key = activeKey();
+    if (!key) throw new Error("No Gemini API key configured. Please add one in Settings.");
+    _geminiClient = new GoogleGenAI({ apiKey: key });
+  }
+  return _geminiClient;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OPENAI-COMPATIBLE FETCH (OpenAI + OpenRouter)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const BASE_URLS: Record<LLMProvider, string> = {
+  gemini: '',
+  openai: 'https://api.openai.com/v1',
+  openrouter: 'https://openrouter.ai/api/v1',
+};
+
+const callOAI = async (
+  messages: { role: string; content: string }[],
+  temperature = 0.7,
+  jsonMode = false
+): Promise<string> => {
+  const key = activeKey();
+  if (!key) throw new Error(`No API key configured. Please add your ${provider() === 'openai' ? 'OpenAI' : 'OpenRouter'} key in Settings.`);
+
+  const baseUrl = BASE_URLS[provider()];
+  const extraHeaders: Record<string, string> = provider() === 'openrouter'
+    ? { 'HTTP-Referer': 'https://rig-catalyst.vercel.app', 'X-Title': 'RIG Catalyst' }
+    : {};
+
+  const body: any = {
+    model: activeModel(),
+    messages,
+    temperature,
+    max_tokens: 4096,
+  };
+  if (jsonMode) body.response_format = { type: 'json_object' };
+
+  const res = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}`, ...extraHeaders },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    let errMsg = `API Error ${res.status}`;
+    try { const e = await res.json(); errMsg = e?.error?.message || errMsg; } catch {}
+    if (res.status === 429) throw new Error('⚠️ Rate limit exceeded. Please wait a moment.');
+    if (res.status === 401) throw new Error(`⚠️ Invalid API key. Please check your key in Settings.`);
+    if (res.status === 402) throw new Error('⚠️ Insufficient credits. Please top up your account.');
+    throw new Error(errMsg);
+  }
+
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || '';
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RETRY UTILITY
+// ─────────────────────────────────────────────────────────────────────────────
+
+const withRetry = async <T>(op: () => Promise<T>, retries = 3, delay = 4000): Promise<T> => {
   try {
-    return await operation();
+    return await op();
   } catch (error: any) {
     const code = error?.status || error?.code || error?.error?.code || error?.response?.status;
     const message = error?.message || error?.error?.message || JSON.stringify(error);
     const status = error?.status || error?.error?.status;
 
-    const isRateLimit = 
-      code === 429 || 
-      code === 403 || 
-      message.toLowerCase().includes('quota') || 
-      message.includes('429') || 
+    const isRateLimit =
+      code === 429 || code === 403 ||
+      message.toLowerCase().includes('quota') ||
+      message.includes('429') ||
       status === 'RESOURCE_EXHAUSTED' ||
       message.includes('RESOURCE_EXHAUSTED');
-      
+
     const isServerOverload = code === 503 || code === 500;
 
     if ((isRateLimit || isServerOverload) && retries > 0) {
       const backoff = delay * 2 + Math.random() * 1000;
-      console.warn(`API Rate Limit/Error (${code}). Retrying in ${Math.round(backoff)}ms...`);
-      
-      await new Promise(resolve => setTimeout(resolve, backoff));
-      return withRetry(operation, retries - 1, backoff);
+      console.warn(`API error (${code}). Retrying in ${Math.round(backoff)}ms...`);
+      await new Promise(r => setTimeout(r, backoff));
+      return withRetry(op, retries - 1, backoff);
     }
-    
-    if (isRateLimit) {
-      throw new Error("⚠️ AI Quota Exceeded. Please wait a moment and try again.");
-    }
-    // For 500 errors that persist after retries, throw a user-friendly message
-    if (code === 500) {
-        console.error("Server Error 500", message);
-        throw new Error("⚠️ AI Service Temporarily Unavailable. Please try a simpler request.");
-    }
+    if (isRateLimit) throw new Error("⚠️ AI Quota Exceeded. Please wait a moment and try again.");
+    if (code === 500) throw new Error("⚠️ AI Service Temporarily Unavailable.");
     throw error;
   }
 };
 
-/**
- * Helper to extract JSON from a potentially messy string response.
- * It looks for the first '[' or '{' and the last ']' or '}'.
- * Returns NULL if no valid JSON structure is found.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// JSON EXTRACTION UTILITY
+// ─────────────────────────────────────────────────────────────────────────────
+
 const extractJSON = (text: string): string | null => {
   if (!text) return null;
-  
-  // Try to find array
-  const firstBracket = text.indexOf('[');
-  const lastBracket = text.lastIndexOf(']');
-  
-  // Try to find object
-  const firstBrace = text.indexOf('{');
-  const lastBrace = text.lastIndexOf('}');
-  
-  const hasArray = firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket;
-  const hasObject = firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace;
-
-  // Determine which one comes first and is valid
+  const firstBracket = text.indexOf('['), lastBracket = text.lastIndexOf(']');
+  const firstBrace = text.indexOf('{'), lastBrace = text.lastIndexOf('}');
+  const hasArray = firstBracket !== -1 && lastBracket > firstBracket;
+  const hasObject = firstBrace !== -1 && lastBrace > firstBrace;
   if (hasArray && hasObject) {
-      // Check if brace is actually the outer container (e.g. { "items": [...] })
-      // If brace starts before bracket and ends after bracket, it's the outer one.
-      if (firstBrace < firstBracket && lastBrace > lastBracket) {
-          return text.substring(firstBrace, lastBrace + 1);
-      }
-      return text.substring(firstBracket, lastBracket + 1);
+    if (firstBrace < firstBracket && lastBrace > lastBracket) return text.substring(firstBrace, lastBrace + 1);
+    return text.substring(firstBracket, lastBracket + 1);
   }
-  
-  if (hasObject) {
-      return text.substring(firstBrace, lastBrace + 1);
-  }
-
-  if (hasArray) {
-      return text.substring(firstBracket, lastBracket + 1);
-  }
-
-  // If no structure found, return null to indicate failure
+  if (hasObject) return text.substring(firstBrace, lastBrace + 1);
+  if (hasArray) return text.substring(firstBracket, lastBracket + 1);
   return null;
 };
 
-export const initializeChat = (settings: UserSettings): Chat => {
-  const ai = getAI();
-  const tailoredSystemPrompt = `
-    ${SYSTEM_PROMPT}
-    CURRENT USER: ${settings.name} (${settings.careerStage})
-    FIELD: ${settings.field}
-    
-    TONE INSTRUCTION: Use simple, clear English. Explain complex concepts as if speaking to an intelligent colleague from a different field. Avoid unnecessary jargon.
-  `;
+// ─────────────────────────────────────────────────────────────────────────────
+// CONNECTION TEST (used by Settings)
+// ─────────────────────────────────────────────────────────────────────────────
 
-  chatSession = ai.chats.create({
-    model: 'gemini-2.5-flash',
-    config: {
-      systemInstruction: tailoredSystemPrompt,
-      temperature: 0.7 + (settings.creativityMode * 0.3),
-    },
-  });
+export const testConnection = async (cfg: LLMConfig): Promise<{ ok: boolean; model: string; error?: string }> => {
+  try {
+    if (cfg.provider === 'gemini') {
+      const ai = new GoogleGenAI({ apiKey: cfg.apiKey });
+      const res = await ai.models.generateContent({ model: cfg.model, contents: 'Reply with only: OK' });
+      return { ok: true, model: cfg.model, error: undefined };
+    } else {
+      const baseUrl = BASE_URLS[cfg.provider];
+      const extraHeaders: Record<string, string> = cfg.provider === 'openrouter'
+        ? { 'HTTP-Referer': 'https://rig-catalyst.vercel.app', 'X-Title': 'RIG Catalyst' } : {};
+      const res = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.apiKey}`, ...extraHeaders },
+        body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: 'Reply with only: OK' }], max_tokens: 10 })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return { ok: false, model: cfg.model, error: err?.error?.message || `HTTP ${res.status}` };
+      }
+      return { ok: true, model: cfg.model };
+    }
+  } catch (e: any) {
+    return { ok: false, model: cfg.model, error: e.message };
+  }
+};
 
-  return chatSession;
+// ─────────────────────────────────────────────────────────────────────────────
+// CHAT
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const initializeChat = (settings: UserSettings): void => {
+  const systemPrompt = `${SYSTEM_PROMPT}
+CURRENT USER: ${settings.name} (${settings.careerStage})
+FIELD: ${settings.field}
+TONE: Clear, jargon-free English. Explain as if to an intelligent colleague from a different field.`;
+
+  if (isGemini()) {
+    _geminiChat = getGemini().chats.create({
+      model: activeModel(),
+      config: { systemInstruction: systemPrompt, temperature: 0.7 + (settings.creativityMode * 0.3) },
+    });
+    _oaiHistory = [];
+  } else {
+    _geminiChat = null;
+    _oaiHistory = [{ role: 'system', content: systemPrompt }];
+  }
 };
 
 export const sendMessage = async (message: string): Promise<string> => {
-  if (!chatSession) throw new Error("Chat session not initialized");
-  return withRetry(async () => {
-    // @ts-ignore
-    const result = await chatSession!.sendMessage({ message });
-    return result.text || "No response generated.";
-  });
-};
-
-/**
- * Fetch papers from a single specific journal. Used for parallel per-journal loading.
- */
-export const fetchPapersFromJournal = async (
-  journal: string,
-  topic: string,
-  dateCutoff: string,
-  count: number
-): Promise<FeedItem[]> => {
-  const ai = getAI();
-  const prompt = `
-    Find ${count} recent academic papers about "${topic}" published in "${journal}" after ${dateCutoff}.
-    Return STRICT JSON array ONLY. Start response with "[". No preamble.
-    [
-      {
-        "title": "Exact paper title",
-        "authors": "Last, F. & Last, F.",
-        "journal": "${journal}",
-        "date": "YYYY-MM-DD",
-        "link": "https://...",
-        "summary": "2-sentence plain English summary. What did they find, and why does it matter?"
-      }
-    ]
-    If fewer than ${count} papers found, return what is available. If none found, return [].
-  `;
-
-  return withRetry(async () => {
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-        config: { tools: [{ googleSearch: {} }] }
-      });
-      const jsonString = extractJSON(response.text || "[]");
-      if (!jsonString) return [];
-      const items = JSON.parse(jsonString) as FeedItem[];
-      return items.filter(i => i.title && i.summary).slice(0, count);
-    } catch (e) {
-      console.error(`Failed to fetch from ${journal}`, e);
-      return [];
-    }
-  }, 2, 3000);
-};
-
-export const fetchResearchFeed = async (settings: UserSettings, page: number = 1, dateCutoff?: string, limit: number = 10): Promise<FeedItem[]> => {
-  const ai = getAI();
-  const offsetPhrase = page > 1 ? `SKIP the first ${limit * (page - 1)} results. Return the NEXT ${limit} unique papers.` : "";
-  const dateInstruction = dateCutoff ? `published AFTER ${dateCutoff}` : "published recently";
-  const topics = settings.field.split(/[,;]+/).map(t => t.trim()).filter(Boolean);
-  const topicDisplay = topics.length > 0 ? topics.join(', ') : "Science and Technology";
-  
-  const query = `
-    Task: Find ${limit + 5} recent academic papers about: "${topicDisplay}".
-    Priority Journals: ${settings.trackedJournals.join(', ')}.
-    Constraint: Papers must be ${dateInstruction}.
-    Output: STRICT JSON LIST ONLY. Start response with "[". Do not write "Here are..."
-    ${offsetPhrase}
-  `;
-
-  // Schema for feed items
-  const prompt = `
-    ${query}
-    
-    Return a JSON array:
-    [
-      {
-        "title": "Exact Title",
-        "authors": "Last, F. & Last, F.",
-        "journal": "Journal Name",
-        "date": "YYYY-MM-DD",
-        "link": "URL",
-        "summary": "Simple 2-sentence summary. Avoid jargon. Explain 'So What?'."
-      }
-    ]
-  `;
-
-  return withRetry(async () => {
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-        config: { tools: [{ googleSearch: {} }] }
-      });
-
-      let text = response.text || "[]";
-      const jsonString = extractJSON(text);
-      
-      if (!jsonString) {
-          console.warn("No JSON found in feed response", text.substring(0, 100) + "...");
-          return [];
-      }
-      
-      try {
-          let items = JSON.parse(jsonString) as FeedItem[];
-          
-          // STRICT CLIENT-SIDE FILTERING
-          if (items.length > 0) {
-              const validJournals = settings.trackedJournals.map(j => j.toLowerCase());
-              const filtered = items.filter(item => {
-                 const itemJournal = item.journal.toLowerCase();
-                 return validJournals.some(v => itemJournal.includes(v));
-              });
-              
-              return filtered.length > 0 ? filtered.slice(0, limit) : items.slice(0, limit);
-          }
-          return items;
-      } catch (e) {
-          console.error("Feed Parse Error", e);
-          return [];
-      }
-    } catch (error) {
-      console.error("Feed Fetch Error", error);
-      throw error;
-    }
-  });
-};
-
-export const calculatePaperImpact = async (title: string, summary: string, link: string): Promise<{metrics: ImpactMetric[], reasoning: string}> => {
-  const ai = getAI();
-  const query = `
-    ACT AS A STRICT GRANT REVIEWER.
-    Paper: "${title}"
-    
-    Task:
-    1. Score this paper (0-100) on 5 metrics. 
-    BE HARSH. Average = 50. Good = 70. Exceptional = 90.
-    - Novelty (Is it actually new?)
-    - Feasibility (Can it be done?)
-    - Soc. Impact (Does it matter?)
-    - Funding (Will agencies pay?)
-    - Interdisciplinary (Does it cross fields?)
-
-    2. Write a "Critical Assessment". 
-    - Paragraph 1: The Verdict. Why this score?
-    - Paragraph 2: The Weakness. What is the biggest flaw?
-    
-    TONE: Use simple, plain English. No complex academic jargon.
-
-    Output JSON ONLY:
-    {
-      "impactReasoning": "Critical assessment text...",
-      "impactMetrics": [ {"category": "Novelty", "score": 50, "fullMark": 100}, ... ]
-    }
-  `;
-
-  return withRetry(async () => {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: query,
-      config: { responseMimeType: "application/json" }
+  if (isGemini()) {
+    if (!_geminiChat) throw new Error("Chat not initialized.");
+    return withRetry(async () => {
+      // @ts-ignore
+      const result = await _geminiChat!.sendMessage({ message });
+      return result.text || "No response generated.";
     });
+  } else {
+    _oaiHistory.push({ role: 'user', content: message });
+    return withRetry(async () => {
+      const reply = await callOAI(_oaiHistory, 0.7);
+      _oaiHistory.push({ role: 'assistant', content: reply });
+      return reply;
+    });
+  }
+};
 
-    const jsonString = extractJSON(response.text || "{}");
+// ─────────────────────────────────────────────────────────────────────────────
+// FEED — PAPER FETCHING
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const fetchPapersFromJournal = async (
+  journal: string, topic: string, dateCutoff: string, count: number
+): Promise<FeedItem[]> => {
+  const prompt = `Find ${count} recent academic papers about "${topic}" published in "${journal}" after ${dateCutoff}.
+Return STRICT JSON array ONLY. Start response with "[". No preamble.
+[{"title":"Exact paper title","authors":"Last, F. & Last, F.","journal":"${journal}","date":"YYYY-MM-DD","link":"https://...","summary":"2-sentence plain English summary."}]
+If fewer than ${count} found, return what's available. If none found, return [].`;
+
+  if (isGemini()) {
+    return withRetry(async () => {
+      try {
+        const response = await getGemini().models.generateContent({
+          model: activeModel(),
+          contents: prompt,
+          config: { tools: [{ googleSearch: {} }] }
+        });
+        const jsonString = extractJSON(response.text || "[]");
+        if (!jsonString) return [];
+        return (JSON.parse(jsonString) as FeedItem[]).filter(i => i.title && i.summary).slice(0, count);
+      } catch (e) { console.error(`Failed to fetch from ${journal}`, e); return []; }
+    }, 2, 3000);
+  } else {
+    return withRetry(async () => {
+      try {
+        const reply = await callOAI([{ role: 'user', content: prompt }], 0.3);
+        const jsonString = extractJSON(reply);
+        if (!jsonString) return [];
+        return (JSON.parse(jsonString) as FeedItem[]).filter(i => i.title && i.summary).slice(0, count);
+      } catch (e) { console.error(`Failed to fetch from ${journal}`, e); return []; }
+    }, 2, 3000);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IMPACT ANALYSIS
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const calculatePaperImpact = async (
+  title: string, summary: string, link: string
+): Promise<{ metrics: ImpactMetric[]; reasoning: string }> => {
+  const query = `ACT AS A STRICT GRANT REVIEWER.
+Paper: "${title}"
+Score this paper (0-100) on 5 metrics. BE HARSH. Average=50. Good=70. Exceptional=90.
+Metrics: Novelty, Feasibility, Soc. Impact, Funding, Interdisciplinary
+Write a Critical Assessment: Paragraph 1 verdict, Paragraph 2 biggest flaw.
+TONE: Plain English, no jargon.
+Output JSON ONLY:
+{"impactReasoning":"...","impactMetrics":[{"category":"Novelty","score":50,"fullMark":100},...]}`;
+
+  return withRetry(async () => {
+    let raw: string;
+    if (isGemini()) {
+      const response = await getGemini().models.generateContent({
+        model: activeModel(),
+        contents: query,
+        config: { responseMimeType: "application/json" }
+      });
+      raw = response.text || "{}";
+    } else {
+      raw = await callOAI([{ role: 'user', content: query }], 0.3, true);
+    }
+    const jsonString = extractJSON(raw);
     if (!jsonString) return { metrics: [], reasoning: "Analysis unavailable." };
     return JSON.parse(jsonString);
   });
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// JOURNAL DISCOVERY
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const suggestJournals = async (userPrompt: string): Promise<JournalSuggestion[]> => {
-  const ai = getAI();
-  const query = `
-    Act as a Senior Research Librarian.
-    
-    Task: Suggest 8 high-impact, relevant academic journals for the research topic: "${userPrompt}".
-    
-    Constraints:
-    - Include a mix of broad impact (e.g. Nature) and specific field journals.
-    - Provide a brief 1-sentence rationale for why it fits this specific topic.
-    - Estimate Impact Factor (IF).
-    
-    Output: STRICT JSON LIST ONLY.
-    [{"name": "Journal Name", "impactFactor": "15.5", "rationale": "Best for..."}]
-  `;
-  
+  const query = `Act as a Senior Research Librarian.
+Suggest 8 high-impact academic journals for: "${userPrompt}".
+Include broad and specific journals. Brief 1-sentence rationale. Estimate Impact Factor.
+Output STRICT JSON ONLY:
+[{"name":"Journal Name","impactFactor":"15.5","rationale":"Best for..."}]`;
+
   return withRetry(async () => {
-      const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: query,
-          config: { responseMimeType: "application/json" }
+    let raw: string;
+    if (isGemini()) {
+      const response = await getGemini().models.generateContent({
+        model: activeModel(),
+        contents: query,
+        config: { responseMimeType: "application/json" }
       });
-      const jsonString = extractJSON(response.text || "[]");
-      if (!jsonString) return [];
-      return JSON.parse(jsonString);
+      raw = response.text || "[]";
+    } else {
+      raw = await callOAI([{ role: 'user', content: query }], 0.3, true);
+    }
+    const jsonString = extractJSON(raw);
+    if (!jsonString) return [];
+    return JSON.parse(jsonString);
   });
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUAL ABSTRACT — Gemini-only
+// ─────────────────────────────────────────────────────────────────────────────
 
 export const generateVisualAbstract = async (title: string, summary: string): Promise<string | null> => {
-  const ai = getAI();
-  const prompt = `Scientific diagram for "${title}". Clean, minimal, professional. White background. No text.`;
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.0-flash-preview-image-generation',
-    contents: { parts: [{ text: prompt }] }
-  });
-  return response.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data || null;
+  if (!isGemini()) return null; // Image generation only supported on Gemini
+  try {
+    const ai = getGemini();
+    const prompt = `Scientific diagram for "${title}". Clean, minimal, professional. White background. No text.`;
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.0-flash-preview-image-generation',
+      contents: { parts: [{ text: prompt }] }
+    });
+    return response.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData)?.inlineData?.data || null;
+  } catch (e) {
+    console.warn("Image generation failed:", e);
+    return null;
+  }
 };
 
-export const generatePaperSummary = async (title: string, link: string | null, attachment: Attachment | null): Promise<string> => {
-  const ai = getAI();
-  const parts: any[] = [];
-  if (attachment) parts.push({ inlineData: { mimeType: attachment.mimeType, data: attachment.data } });
-  
-  const prompt = `
-  Analyze the paper "${title}".
-  Provide a detailed summary using EXACTLY these headers:
+// ─────────────────────────────────────────────────────────────────────────────
+// PAPER SUMMARY
+// ─────────────────────────────────────────────────────────────────────────────
 
-  ## 1. Main Message
-  What is the core takeaway?
+export const generatePaperSummary = async (
+  title: string, link: string | null, attachment: Attachment | null
+): Promise<string> => {
+  const summaryPrompt = `Analyze the paper "${title}".
+Provide a detailed summary using EXACTLY these headers:
 
-  ## 2. Background Context
-  What is the history?
-
-  ## 3. Research Gap
-  What specific gap is addressed?
-
-  ## 4. Methodology
-  How was it done?
-
-  ## 5. Plots and Diagrams
-  Describe the key figures used in the paper.
-
-  ## 6. Interesting Results
-  What were the most surprising findings?
-
-  ## 7. Plotting Instructions
-  Provide Python (Matplotlib/Seaborn) code to generate a similar style of plot to the main figure in this paper using dummy data.
-  `;
-  
-  if (link && !attachment) parts.push({ text: `${prompt}\nCONTEXT URL: ${link} (Use Search)` });
-  else parts.push({ text: prompt });
+## 1. Main Message
+## 2. Background Context
+## 3. Research Gap
+## 4. Methodology
+## 5. Key Results
+## 6. Interesting Findings
+## 7. Plotting Instructions
+(Provide Python Matplotlib/Seaborn code to reproduce the main figure using dummy data.)`;
 
   return withRetry(async () => {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: { parts },
-      config: { tools: (link && !attachment) ? [{ googleSearch: {} }] : undefined }
-    });
-    return response.text || "Summary unavailable.";
+    if (isGemini()) {
+      const parts: any[] = [];
+      if (attachment) parts.push({ inlineData: { mimeType: attachment.mimeType, data: attachment.data } });
+      const finalPrompt = link && !attachment ? `${summaryPrompt}\nCONTEXT URL: ${link} (Use Search)` : summaryPrompt;
+      parts.push({ text: finalPrompt });
+      const response = await getGemini().models.generateContent({
+        model: activeModel(),
+        contents: { parts },
+        config: { tools: (link && !attachment) ? [{ googleSearch: {} }] : undefined }
+      });
+      return response.text || "Summary unavailable.";
+    } else {
+      // Non-Gemini: no attachment or grounding support — text-only
+      const prompt = link ? `${summaryPrompt}\n\nPaper URL (for context): ${link}` : summaryPrompt;
+      return callOAI([{ role: 'user', content: prompt }], 0.5);
+    }
   });
 };
 
-export const findRelatedPapers = async (title: string): Promise<string> => {
-  const ai = getAI();
-  const query = `Find 5 papers related to "${title}". Output Markdown list with links. Verify links.`;
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: query,
-    config: { tools: [{ googleSearch: {} }] }
-  });
-  return response.text || "No related papers found.";
-};
+// ─────────────────────────────────────────────────────────────────────────────
+// CONTENT ANALYSIS (used by Analysis Studio tabs + Fusion Lab)
+// ─────────────────────────────────────────────────────────────────────────────
 
-export const analyzeContent = async (promptPrefix: string, attachment: Attachment | null, link: string | null, mode: string = 'GENERAL', title: string = 'Paper'): Promise<string> => {
-  const ai = getAI();
-  const parts: any[] = [];
-  if (attachment) parts.push({ inlineData: { mimeType: attachment.mimeType, data: attachment.data } });
-  
+export const analyzeContent = async (
+  promptPrefix: string,
+  attachment: Attachment | null,
+  link: string | null,
+  mode: string = 'GENERAL',
+  title: string = 'Paper'
+): Promise<string> => {
   let finalPrompt = "";
 
   if (promptPrefix.includes("Idea Fusion") || mode === 'FUSION') {
-      // MASTER BACKEND PROMPT FOR FUSION (Trans-Domain Synthesis)
-      const inputMatch = promptPrefix.match(/Idea Fusion (.*?) with (.*)/);
-      const sourcePaper = inputMatch ? inputMatch[1] : title;
-      const fusionTarget = inputMatch ? inputMatch[2] : "Interdisciplinary Application";
+    const inputMatch = promptPrefix.match(/Idea Fusion (.*?) with (.*)/);
+    const sourcePaper = inputMatch ? inputMatch[1] : title;
+    const fusionTarget = inputMatch ? inputMatch[2] : "Interdisciplinary Application";
+    finalPrompt = `ROLE: You are an Interdisciplinary Research Architect performing Trans-Domain Synthesis.
 
-      finalPrompt = `
-      ROLE: You are an Interdisciplinary Research Architect. Your task is to perform "Trans-Domain Synthesis" by taking the "First Principles" of the source paper and applying them to the User's Research Focus or Fusion Target.
+INPUTS:
+- Source Paper/Idea: ${sourcePaper}
+- Fusion Target: ${fusionTarget}
 
-      INPUTS:
-      - Source Paper/Idea: ${sourcePaper}
-      - Fusion Target / User Focus: ${fusionTarget}
-      
-      OUTPUT FORMATTING RULES:
-      1. Use PLAIN TEXT MARKDOWN TABLES for the structure below.
-      2. DO NOT use dollar signs ($) for notation. Use words.
-      3. Be critical and honest.
-      4. TONE: Engaging, Colorful, but Scientifically Accurate. Avoid Jargon.
+FORMATTING: Plain text Markdown tables. No dollar signs. Be critical and honest. Engaging but scientifically accurate.
 
-      STRUCTURE OF OUTPUT:
+## 1. Core Concept of Source Paper
+| Aspect | Detail |
+| :--- | :--- |
+| First Principle | ... |
+| Mechanism | ... |
 
-      ## 1. Core Concept of Source Paper
-      Describe the fundamental problem and the "First Principle" solution. Ignore jargon; focus on the underlying logic.
-      | Aspect | Detail |
-      | :--- | :--- |
-      | First Principle | ... |
-      | Mechanism | ... |
+## 2. User Integration & Pain Points
+| Aspect | Detail |
+| :--- | :--- |
+| User Problem | ... |
+| Integration Logic | ... |
 
-      ## 2. User Integration & Pain Points
-      Define how this logic maps to the user's challenges (${fusionTarget}).
-      | Aspect | Detail |
-      | :--- | :--- |
-      | User Problem | ... |
-      | Integration Logic | ... |
+## 3. Fusion Scenarios
+| Scenario | How it is Fused | Why it is Worth Taking |
+| :--- | :--- | :--- |
+| 1. [Name] | ... | ... |
+| 2. [Name] | ... | ... |
+| 3. [Name] | ... | ... |
 
-      ## 3. Fusion Scenarios
-      Provide 3 distinct scenarios of how these ideas can be fused.
-      | Scenario | How it is Fused | Why it is Worth Taking |
-      | :--- | :--- | :--- |
-      | 1. [Name] | ... | ... |
-      | 2. [Name] | ... | ... |
-      | 3. [Name] | ... | ... |
+## 4. Shortcomings & Cautions
+| Pitfall | Why it is a Concern |
+| :--- | :--- |
 
-      ## 4. Shortcomings & Cautions
-      Analyze the "Reality Gap."
-      | Pitfall | Why it is a Concern |
-      | :--- | :--- |
-      | [Name] | ... |
-
-      ## 5. Critical Thinking & Research
-      Suggest specific aspects the user should investigate.
-      `;
+## 5. Critical Thinking & Research
+Suggest specific aspects the user should investigate.`;
   } else if (mode === 'MINDMAP') {
-      finalPrompt = `
-      Create a "Logic Flow" Flowchart describing the ENTIRE paper "${title}".
-      Format: Mermaid.js graph OR text-based ASCII flowchart.
-      Structure: Problem -> Hypothesis -> Methodology -> Experiments -> Analysis -> Conclusion.
-      `;
+    finalPrompt = `Create a Logic Flow flowchart for "${title}". Format: Mermaid.js graph or ASCII flowchart.
+Structure: Problem → Hypothesis → Methodology → Experiments → Analysis → Conclusion.`;
   } else if (mode === 'GAPS') {
-      finalPrompt = `Analyze "${title}" for gaps. Output 3 "Opportunity Cards": Gap -> Opportunity.`;
+    finalPrompt = `Analyze "${title}" for research gaps. Output 3 "Opportunity Cards": Gap → Opportunity → Suggested Method.`;
   } else if (mode === 'EDITORIAL') {
-      finalPrompt = `Act as a Senior Editor. Critique "${title}". Acceptance Logic vs Rejection Risk.`;
+    finalPrompt = `Act as a Senior Editor. Critique "${title}". Acceptance Logic vs Rejection Risk. Be specific and direct.`;
   } else if (mode === 'PROPOSAL') {
-      finalPrompt = `
-      ROLE: You are a senior grant-writing expert helping a researcher turn a paper into a fundable proposal.
+    finalPrompt = `ROLE: Senior grant-writing expert helping turn a paper into a fundable proposal.
+Paper: "${title}"
 
-      Paper: "${title}"
+## 1. Executive Summary
+One paragraph pitch for a non-specialist program officer. Lead with societal need.
 
-      OUTPUT STRUCTURE:
+## 2. Research Objectives
+| Objective | Measurable Outcome | Timeline |
+| :--- | :--- | :--- |
 
-      ## 1. Executive Summary
-      One paragraph pitch for a non-specialist program officer. Lead with the societal need.
+## 3. Methodology Plan
+How to extend or replicate this work?
 
-      ## 2. Research Objectives
-      List 3-4 specific, measurable objectives derived from this paper's direction.
-      | Objective | Measurable Outcome | Timeline |
-      | :--- | :--- | :--- |
+## 4. Funding Agency Match
+| Agency / Program | Fit Score (1-10) | Rationale |
+| :--- | :--- | :--- |
 
-      ## 3. Methodology Plan
-      How would you extend or replicate this work? What experiments or analyses are needed?
+## 5. Budget Considerations
+Major cost drivers (personnel, equipment, data, compute).
 
-      ## 4. Funding Agency Match
-      Which agencies or programs (NSF, NIH, ERC, DARPA, etc.) are best aligned and why?
-      | Agency / Program | Fit Score (1-10) | Rationale |
-      | :--- | :--- | :--- |
+## 6. Risks & Mitigation
+Top 2-3 risks and how to address them.
 
-      ## 5. Budget Considerations
-      What are the major cost drivers for this type of research? (Personnel, equipment, data, compute)
-
-      ## 6. Risks & Mitigation
-      What are the top 2-3 risks a reviewer would flag, and how would you address them?
-
-      TONE: Practical, action-oriented. Plain English.
-      `;
+TONE: Practical, action-oriented. Plain English.`;
   } else {
-      // Standard Prompt
-      finalPrompt = promptPrefix + "\n\nSTRUCTURE YOUR RESPONSE:\n- Use **Bold Headers** for sections.\n- Use **Bullet Points** for readability.\n- KEEP IT SIMPLE: Plain English, no jargon unless necessary.\n- BE CRITICAL: Point out limitations clearly.";
+    finalPrompt = promptPrefix + "\n\nSTRUCTURE:\n- Use **Bold Headers**.\n- Use bullet points.\n- Plain English, no jargon.\n- Be critical about limitations.";
   }
-  
-  if (link && !attachment) finalPrompt += `\nCONTEXT URL: ${link}. Use Google Search to get details.`;
-  
-  parts.push({ text: finalPrompt });
-  
+
+  if (link && !attachment) finalPrompt += `\nCONTEXT URL: ${link}. Use search to get details.`;
+
   return withRetry(async () => {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: { parts },
-      config: { tools: (link || !attachment) ? [{ googleSearch: {} }] : undefined }
-    });
-    return response.text || "Analysis complete.";
+    if (isGemini()) {
+      const parts: any[] = [];
+      if (attachment) parts.push({ inlineData: { mimeType: attachment.mimeType, data: attachment.data } });
+      parts.push({ text: finalPrompt });
+      const response = await getGemini().models.generateContent({
+        model: activeModel(),
+        contents: { parts },
+        config: { tools: (link || !attachment) ? [{ googleSearch: {} }] : undefined }
+      });
+      return response.text || "Analysis complete.";
+    } else {
+      return callOAI([{ role: 'user', content: finalPrompt }], 0.7);
+    }
   });
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LEGACY EXPORTS (kept for backward compat)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const fetchResearchFeed = async (
+  settings: UserSettings, page = 1, dateCutoff?: string, limit = 10
+): Promise<FeedItem[]> => {
+  const topics = settings.field.split(/[,;]+/).map(t => t.trim()).filter(Boolean).join(', ');
+  const dateInstruction = dateCutoff ? `published AFTER ${dateCutoff}` : "published recently";
+  const prompt = `Find ${limit} recent academic papers about "${topics}".
+Priority Journals: ${settings.trackedJournals.join(', ')}.
+Constraint: Papers must be ${dateInstruction}.
+Output STRICT JSON ONLY starting with "[".
+[{"title":"...","authors":"...","journal":"...","date":"YYYY-MM-DD","link":"...","summary":"..."}]`;
+
+  if (isGemini()) {
+    return withRetry(async () => {
+      try {
+        const response = await getGemini().models.generateContent({
+          model: activeModel(),
+          contents: prompt,
+          config: { tools: [{ googleSearch: {} }] }
+        });
+        const jsonString = extractJSON(response.text || "[]");
+        if (!jsonString) return [];
+        return (JSON.parse(jsonString) as FeedItem[]).slice(0, limit);
+      } catch { return []; }
+    });
+  } else {
+    return withRetry(async () => {
+      try {
+        const reply = await callOAI([{ role: 'user', content: prompt }], 0.3);
+        const jsonString = extractJSON(reply);
+        if (!jsonString) return [];
+        return (JSON.parse(jsonString) as FeedItem[]).slice(0, limit);
+      } catch { return []; }
+    });
+  }
+};
+
+export const findRelatedPapers = async (title: string): Promise<string> => {
+  const query = `Find 5 papers related to "${title}". Output Markdown list with links. Verify links.`;
+  if (isGemini()) {
+    const response = await getGemini().models.generateContent({
+      model: activeModel(), contents: query,
+      config: { tools: [{ googleSearch: {} }] }
+    });
+    return response.text || "No related papers found.";
+  }
+  return callOAI([{ role: 'user', content: query }]);
 };
