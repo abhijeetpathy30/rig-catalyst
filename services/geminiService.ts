@@ -474,13 +474,98 @@ FORMATTING: Plain text Markdown tables. No dollar signs. Be critical and honest.
 
 ## 5. Critical Thinking & Research
 Suggest specific aspects the user should investigate.`;
+  } else if (mode === 'INSIGHTS') {
+    finalPrompt = `You are a critical research analyst. Extract the 5-7 most significant insights from the paper "${title}".
+
+Return ONLY valid JSON (no markdown fences, no preamble):
+{
+  "insights": [
+    {
+      "number": 1,
+      "title": "Short insight title (5-8 words)",
+      "finding": "What was found or demonstrated — be specific, cite numbers/percentages where possible (2-3 sentences)",
+      "significance": "Why this matters scientifically or practically (1-2 sentences)",
+      "category": "Empirical|Methodological|Conceptual|Statistical|Applied"
+    }
+  ]
+}`;
   } else if (mode === 'MINDMAP') {
-    finalPrompt = `Create a Logic Flow flowchart for "${title}". Format: Mermaid.js graph or ASCII flowchart.
-Structure: Problem → Hypothesis → Methodology → Experiments → Analysis → Conclusion.`;
+    finalPrompt = `Create a detailed Mermaid.js flowchart for the paper "${title}".
+
+Fill each node with specific content from the paper. Add sub-nodes for key details.
+
+\`\`\`mermaid
+graph TD
+    A[Problem: ...] --> B[Research Gap: ...]
+    B --> C[Hypothesis: ...]
+    C --> D[Methodology: ...]
+    D --> E1[Experiment 1: ...]
+    D --> E2[Experiment 2: ...]
+    E1 & E2 --> F[Analysis: ...]
+    F --> G1[Key Finding 1: ...]
+    F --> G2[Key Finding 2: ...]
+    G1 & G2 --> H[Conclusions: ...]
+    H --> I[Future Work: ...]
+\`\`\`
+
+Return ONLY the mermaid code block.`;
   } else if (mode === 'GAPS') {
-    finalPrompt = `Analyze "${title}" for research gaps. Output 3 "Opportunity Cards": Gap → Opportunity → Suggested Method.`;
+    finalPrompt = `You are a research strategist. Identify the 3 most critical and actionable research gaps in "${title}".
+
+Return ONLY valid JSON (no markdown fences, no preamble):
+{
+  "gaps": [
+    {
+      "number": 1,
+      "title": "Gap title (5-8 words)",
+      "gap": "Specific limitation or missing knowledge in this paper (2-3 sentences, be precise)",
+      "opportunity": "Research opportunity this gap creates — who could exploit it and how (2-3 sentences)",
+      "method": "Specific methodology to address this gap (1-2 sentences)",
+      "priority": "High|Medium|Low"
+    }
+  ]
+}`;
+  } else if (mode === 'CRITIQUE') {
+    finalPrompt = `You are a harsh, skeptical peer reviewer for a top-tier journal. Conduct a rigorous adversarial critique of "${title}". Do NOT be kind. Identify every significant weakness.
+
+Return ONLY valid JSON (no markdown fences, no preamble):
+{
+  "verdict": "Accept|Minor Revision|Major Revision|Reject",
+  "score": 72,
+  "summary": "One brutally honest sentence capturing the paper's central weakness or strength",
+  "critiques": [
+    {
+      "severity": "Fatal|Major|Minor",
+      "category": "Methodology|Data Quality|Novelty|Presentation|Statistical|Reproducibility|Scope",
+      "issue": "Precise description of the problem with specific examples (2-3 sentences)",
+      "fix": "Exactly what the authors must do to address this (1-2 sentences)"
+    }
+  ],
+  "strengths": [
+    "Specific concrete strength 1",
+    "Specific concrete strength 2",
+    "Specific concrete strength 3"
+  ],
+  "recommendation": "2-3 sentence final paragraph with reasoning for the verdict"
+}`;
   } else if (mode === 'EDITORIAL') {
-    finalPrompt = `Act as a Senior Editor. Critique "${title}". Acceptance Logic vs Rejection Risk. Be specific and direct.`;
+    finalPrompt = `You are a strategic publishing consultant helping the AUTHORS of "${title}" craft their strongest submission case.
+
+Write from the AUTHORS' perspective — coach them on how to convince an editor. Use "the authors should..." or "you can argue..." framing. Do NOT write as the editor. Do NOT make verdicts.
+
+## Strongest Arguments for Acceptance
+What are the 3-4 most compelling arguments the authors should emphasize in their cover letter?
+
+## Essential Revisions Before Submission
+What specific changes must the authors make? Be brutally specific.
+
+## Best-Fit Journals & Pitch Strategy
+Recommend 3-4 journals with specific rationale. How to pitch to each editorial office?
+
+## Anticipating Reviewer Objections
+Top 3 objections reviewers will raise. How should the authors pre-empt these in the manuscript?
+
+TONE: Pragmatic, strategic, direct. A seasoned consultant, not a cheerleader.`;
   } else if (mode === 'PROPOSAL') {
     finalPrompt = `ROLE: Senior grant-writing expert helping turn a paper into a fundable proposal.
 Paper: "${title}"

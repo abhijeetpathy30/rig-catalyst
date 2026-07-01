@@ -3,7 +3,7 @@ import {
   BookOpen, Search, Zap, PenTool, Settings, X, Send, Sparkles, ArrowRight, ArrowLeft,
   RefreshCw, Plus, Network, FileText, Image as ImageIcon, Bookmark, Trash2, Lightbulb,
   Moon, Sun, AlertTriangle, FlaskConical, Layout, Upload, Link, User, Check, Compass,
-  Quote, Copy, Shield, Bell, Clock
+  Quote, Copy, Shield, Bell, Clock, Flame
 } from 'lucide-react';
 import {
   AppView, Message, UserSettings, FeedItem, Attachment, JournalSuggestion,
@@ -17,6 +17,7 @@ import {
   generatePaperSummary, suggestJournals, setLLMConfig, testConnection, getLLMConfig
 } from './services/geminiService';
 import { MarkdownMessage } from './components/MarkdownMessage';
+import { InsightCards, GapCards, CritiqueCards, EditorialCard } from './components/StudioRenderers';
 import { SimpleChart } from './components/SimpleChart';
 import { InputSection } from './components/InputSection';
 import { CitationModal } from './components/CitationModal';
@@ -187,7 +188,7 @@ export default function App() {
 
   // ── Analysis Studio
   const [studioItem, setStudioItem] = useState<FeedItem | null>(null);
-  const [studioTab, setStudioTab] = useState<'SUMMARY' | 'IMPACT' | 'INSIGHTS' | 'GAPS' | 'FUSION' | 'MINDMAP' | 'EDITORIAL'>('SUMMARY');
+  const [studioTab, setStudioTab] = useState<'SUMMARY' | 'IMPACT' | 'INSIGHTS' | 'GAPS' | 'FUSION' | 'MINDMAP' | 'EDITORIAL' | 'CRITIQUE'>('SUMMARY');
   const [studioContent, setStudioContent] = useState<Record<string, string | null>>({});
   const [isStudioAnalyzing, setIsStudioAnalyzing] = useState(false);
   const [studioFusionInput, setStudioFusionInput] = useState('');
@@ -928,6 +929,7 @@ Return ONLY valid JSON (no markdown):
                       { id: 'IMPACT', label: 'Impact', icon: Sparkles },
                       { id: 'INSIGHTS', label: 'Core Insights', icon: Lightbulb },
                       { id: 'GAPS', label: 'Gap Analysis', icon: Search },
+                      { id: 'CRITIQUE', label: 'Critique', icon: Flame },
                       { id: 'FUSION', label: 'Idea Fusion', icon: Zap },
                       { id: 'MINDMAP', label: 'Logic Flow', icon: Network },
                       { id: 'EDITORIAL', label: 'Editor View', icon: PenTool },
@@ -955,12 +957,12 @@ Return ONLY valid JSON (no markdown):
                             <p className="text-xs text-slate-400 leading-relaxed">Fuse the key mechanisms of this paper with a secondary domain to discover novel interdisciplinary hypotheses.</p>
                             <div>
                               <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-2">Target Domain</label>
-                              <input value={studioFusionInput} onChange={e => setStudioFusionInput(e.target.value)} placeholder={`e.g. ${settings.field}`}
+                              <input value={studioFusionInput} onChange={e => { setStudioFusionInput(e.target.value); setStudioContent(prev => ({ ...prev, FUSION: null })); }} placeholder={`e.g. ${settings.field}`}
                                 className="w-full p-3 bg-slate-900 border border-slate-700 rounded-xl text-sm text-slate-200 outline-none focus:border-amber-500 transition-all" />
                             </div>
                             <div className="flex flex-wrap gap-1.5">
                               {[settings.field, "Generative AI", "Quantum Computing", "Climate Science", "Robotics"].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).slice(0, 5).map(d => (
-                                <button key={d} onClick={() => setStudioFusionInput(d)}
+                                <button key={d} onClick={() => { setStudioFusionInput(d); setStudioContent(prev => ({ ...prev, FUSION: null })); }}
                                   className={`px-2 py-0.5 rounded-full text-[10px] border transition-colors ${studioFusionInput === d ? 'bg-amber-500/10 border-amber-500 text-amber-400' : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-600'}`}>
                                   {d}
                                 </button>
@@ -989,7 +991,17 @@ Return ONLY valid JSON (no markdown):
                           {studioTab === 'IMPACT' && studioItem.impactMetrics && (
                             <div className="mb-6 h-72 w-full max-w-xl mx-auto"><SimpleChart data={studioItem.impactMetrics} /></div>
                           )}
-                          <MarkdownMessage content={studioContent[studioTab] || studioItem.impactReasoning || "Select a tab to begin analysis."} />
+                          {studioTab === 'INSIGHTS' && studioContent.INSIGHTS ? (
+                            <InsightCards content={studioContent.INSIGHTS} />
+                          ) : studioTab === 'GAPS' && studioContent.GAPS ? (
+                            <GapCards content={studioContent.GAPS} />
+                          ) : studioTab === 'CRITIQUE' && studioContent.CRITIQUE ? (
+                            <CritiqueCards content={studioContent.CRITIQUE} />
+                          ) : studioTab === 'EDITORIAL' && studioContent.EDITORIAL ? (
+                            <EditorialCard content={studioContent.EDITORIAL} />
+                          ) : (
+                            <MarkdownMessage content={studioContent[studioTab] || (studioTab === 'IMPACT' ? studioItem.impactReasoning : null) || ''} />
+                          )}
                         </div>
                       )}
                     </div>
